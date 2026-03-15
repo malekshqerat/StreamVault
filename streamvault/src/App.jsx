@@ -901,7 +901,11 @@ export default function App() {
       const res = await fetch(`${PROXY}/stalker/channels?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      setChannels((data.channels || []).map(ch => ({ ...ch, _stalkerCmd: ch.url, url: null })));
+      setChannels((data.channels || []).map(ch => {
+        const raw = (ch.url || "").replace(/^ffmpeg\s+/, "").trim();
+        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
+        return { ...ch, _stalkerCmd: ch.url, url: isDirect ? raw : null };
+      }));
     } catch(e) { console.error("Stalker channels error:", e); }
     finally { setLoading(false); }
   }
@@ -913,7 +917,11 @@ export default function App() {
       const res = await fetch(`${PROXY}/stalker/vod?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      setVod((data.items || []).map(v => ({ ...v, _stalkerCmd: v.url, url: null })));
+      setVod((data.items || []).map(v => {
+        const raw = (v.url || "").replace(/^ffmpeg\s+/, "").trim();
+        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
+        return { ...v, _stalkerCmd: v.url, url: isDirect ? raw : null };
+      }));
     } catch(e) { console.error("Stalker VOD error:", e); }
     finally { setLoading(false); }
   }
