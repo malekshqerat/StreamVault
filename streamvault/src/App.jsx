@@ -735,25 +735,42 @@ function Setup({ onConnect }) {
   function detectFromText(text) {
     const results = [];
 
-    // Detect Stalker portals: URL with /c or /c/ + MAC address
-    const macPattern = /([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/g;
+    // Detect Stalker portals + MACs + serial + deviceId by proximity in text
     const portalPattern = /https?:\/\/[^\s"'<>]+?\/(?:stalker_portal\/)?c\/?/gi;
+    const macPattern = /([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/g;
 
-    const portals = text.match(portalPattern) || [];
-    const macs = text.match(macPattern) || [];
+    // Split text into blocks (by double newline or portal URL) and pair within each block
+    const lines = text.split("\n");
+    let blocks = [], cur = [];
+    for (const line of lines) {
+      if (portalPattern.test(line) && cur.length > 0) { blocks.push(cur.join("\n")); cur = []; }
+      portalPattern.lastIndex = 0;
+      cur.push(line);
+    }
+    if (cur.length) blocks.push(cur.join("\n"));
+    if (blocks.length <= 1) blocks = [text]; // fallback: treat as single block
 
-    // Pair portals with MACs found nearby in text
-    if (portals.length && macs.length) {
-      portals.forEach(portal => {
-        macs.forEach(mac => {
-          results.push({ type:"stalker", server:portal.replace(/\/+$/,""), mac, label:`Stalker · ${mac.slice(-5)}` });
-        });
-      });
-    } else if (macs.length) {
-      // MACs without portals - still useful
-      macs.forEach(mac => {
-        results.push({ type:"stalker", server:"", mac, label:`MAC · ${mac}` });
-      });
+    const usedMacs = new Set();
+    for (const block of blocks) {
+      const bp = block.match(portalPattern) || [];
+      const bm = block.match(macPattern) || [];
+      // Extract serial: look for SERIAL followed by hex-ish string
+      const serialMatch = block.match(/(?:SERIAL|𝚂𝙴𝚁𝙸𝙰𝙻|𝐒𝐄𝐑𝐈𝐀𝐋)[^\w]*?(?:NUM|CUT|𝙽𝚄𝙼|𝐂𝐔𝐓)?[^A-Za-z0-9]*?([A-Fa-f0-9]{10,})/i);
+      const serial = serialMatch ? serialMatch[1] : "";
+      // Extract deviceId: look for DEVICE ID followed by hex string (64 chars)
+      const deviceMatch = block.match(/(?:DEVICE|𝙳𝙴𝚅𝙸𝙲𝙴|𝐃𝐄𝐕𝐈𝐂𝐄)[^A-Za-z0-9]*?(?:ID|𝙸𝙳|𝐈𝐃)[^A-Fa-f0-9]*?(?:1️⃣❖2️⃣)?[^A-Fa-f0-9]*?([A-Fa-f0-9]{32,})/i);
+      const deviceId = deviceMatch ? deviceMatch[1] : "";
+
+      if (bp.length && bm.length) {
+        const portal = bp[0].replace(/\/+$/,"");
+        const mac = bm[0];
+        if (!usedMacs.has(mac)) {
+          usedMacs.add(mac);
+          results.push({ type:"stalker", server:portal, mac, serial, deviceId, label:`Stalker · ${mac.slice(-5)}` });
+        }
+      } else if (bm.length) {
+        bm.forEach(mac => { if (!usedMacs.has(mac)) { usedMacs.add(mac); results.push({ type:"stalker", server:"", mac, serial, deviceId, label:`MAC · ${mac}` }); } });
+      }
     }
 
     // Detect Xtream: http://host:port with username/password patterns
@@ -877,7 +894,7 @@ function Setup({ onConnect }) {
                   <div key={i} style={{display:"flex",alignItems:"center",gap:".5rem",padding:".45rem .65rem",
                     background:"var(--s2)",border:"1px solid var(--b2)",borderRadius:"8px",cursor:"pointer",transition:"all .2s"}}
                     onClick={() => {
-                      if (d.type==="stalker") { setType("stalker"); set("server",d.server); set("mac",d.mac); }
+                      if (d.type==="stalker") { setType("stalker"); set("server",d.server); set("mac",d.mac); if(d.serial){set("serial",d.serial);setShowAdvanced(true);} if(d.deviceId){set("deviceId",d.deviceId);set("deviceId2",d.deviceId);setShowAdvanced(true);} }
                       else if (d.type==="xtream") { setType("xtream"); set("server",d.server); set("user",d.user); set("pass",d.pass); }
                       else if (d.type==="m3u") { setType("m3u"); set("url",d.url); }
                     }}
