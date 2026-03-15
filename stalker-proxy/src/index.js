@@ -12,8 +12,8 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ── Cache: { `${portalUrl}|${mac}` : { token, base, apiPath, expires } }
-const tokenCache = new Map();
+// ── Cache: path resolution cached long-term, tokens are never cached (portals invalidate on re-handshake)
+const pathCache = new Map();
 
 // ─────────────────────────────────────────────────────────────────
 // HELPERS
@@ -83,89 +83,108 @@ async function tryHandshake(base, apiPath, mac, portalUrl) {
   const url = `${base}${apiPath}?${qs}`;
   const headers = stalkerHeaders(mac, "", portalUrl);
 
-  // Try GET first, then POST (extractstb pattern)
-  for (const method of ["GET", "POST"]) {
-    try {
-      const opts = { headers, timeout: 8000 };
-      if (method === "POST") {
-        opts.method = "POST";
-        opts.body = qs;
-      }
-      const res = await fetch(url, opts);
-      if (!res.ok) continue;
+  try {
+    const res = await fetch(url, { headers, timeout: 8000 });
+    if (res.status === 429) { console.log(`  ${base}${apiPath} → 429 rate limited`); throw Object.assign(new Error("rate limited"), {code:"RATE_LIMITED"}); }
+    if (res.status === 404) return null;
+    if (res.ok) {
       const data = await res.json();
       const token = data?.js?.token;
       if (token) return { token, base, apiPath };
-    } catch { continue; }
-  }
+    }
+  } catch(e) { if (e.code === "RATE_LIMITED") throw e; /* other errors: skip */ }
   return null;
 }
 
-// Full handshake flow: xpcom extraction → fallback paths → /c/ toggle
-async function fetchToken(portalUrl, mac) {
-  const key = cacheKey(portalUrl, mac);
-  const cached = tokenCache.get(key);
-  if (cached && cached.expires > Date.now()) return cached;
+// Get a session with a valid token — does exactly ONE handshake
+// Path resolution is cached; token is always fresh
+async function getSession(portal, mac, opts = {}) {
+  const key = cacheKey(portal, mac);
+  const cached = pathCache.get(key);
 
-  const stripped = portalUrl.replace(/\/+$/, "");
+  // If path is known, do a single handshake on the known path
+  if (cached) {
+    const result = await tryHandshake(cached.base, cached.apiPath, mac, portal);
+    if (result) {
+      return {
+        token: result.token, base: cached.base, apiPath: cached.apiPath, portal, mac, opts,
+        headers: stalkerHeaders(mac, result.token, portal, opts),
+        async refresh() { return getSession(portal, mac, opts); },
+      };
+    }
+    // Path may have changed — clear cache and re-discover
+    pathCache.delete(key);
+  }
 
-  // Build base URLs to try (with and without /c/)
+  // Discover path: try each base+path combo (each attempt is a handshake)
+  const stripped = portal.replace(/\/+$/, "");
   const bases = [stripped + "/"];
-  if (stripped.endsWith("/c")) bases.push(stripped.replace(/\/c$/, "") + "/");
-  else bases.push(stripped + "/c/");
+  if (stripped.endsWith("/c")) {
+    bases.push(stripped.replace(/\/c$/, "") + "/");
+    const root = stripped.replace(/\/[^/]+\/c$/, "");
+    if (root !== stripped) bases.push(root + "/");
+  } else {
+    bases.push(stripped + "/c/");
+  }
 
-  // Step 1: Try to extract API path from xpcom.common.js
-  const extractedPath = await extractApiPath(portalUrl, mac);
-
-  // Step 2: Build ordered list of API paths to try
-  const pathsToTry = extractedPath
-    ? [extractedPath, ...API_PATHS.filter(p => p !== extractedPath)]
-    : [...API_PATHS];
-
-  // Step 3: Try each base × path combination
   for (const base of bases) {
-    for (const apiPath of pathsToTry) {
-      const result = await tryHandshake(base, apiPath, mac, portalUrl);
-      if (result) {
-        const entry = { ...result, expires: Date.now() + 4 * 60 * 60 * 1000 };
-        tokenCache.set(key, entry);
-        console.log(`✓ Handshake OK: ${base}${apiPath}`);
-        return entry;
+    for (const path of API_PATHS) {
+      try {
+        const result = await tryHandshake(base, path, mac, portal);
+        if (result) {
+          pathCache.set(key, { base, apiPath: path });
+          console.log(`✓ Path resolved: ${base}${path}`);
+          return {
+            token: result.token, base, apiPath: path, portal, mac, opts,
+            headers: stalkerHeaders(mac, result.token, portal, opts),
+            async refresh() { return getSession(portal, mac, opts); },
+          };
+        }
+      } catch(e) {
+        if (e.code === "RATE_LIMITED") throw new Error("Portal rate limited (429). Try again in a minute.");
+        throw e;
       }
     }
   }
-
   throw new Error("Handshake failed: could not obtain token from portal");
 }
 
-// Get a valid token + resolved base + apiPath for a portal
-async function getSession(portal, mac, opts = {}) {
-  const session = await fetchToken(portal, mac);
-  return {
-    token:   session.token,
-    base:    session.base,
-    apiPath: session.apiPath,
-    headers: stalkerHeaders(mac, session.token, portal, opts),
-  };
+// portalFetch with automatic token refresh on auth failure
+async function portalFetchRetry(session, params, timeout) {
+  let result = await portalFetch(session, params, timeout);
+  if (result === null) {
+    const fresh = await session.refresh();
+    Object.assign(session, fresh);
+    result = await portalFetch(session, params, timeout);
+  }
+  if (result === null) throw new Error(`Authorization failed for ${params.action || "unknown"}`);
+  return result;
 }
 
-// Make an API call using the resolved session (tries GET then POST)
+// Make an API call using the resolved session
 async function portalFetch(session, params, timeout = 12000) {
   const qs = new URLSearchParams({ ...params, JsHttpRequest: "1-xml" }).toString();
   const url = `${session.base}${session.apiPath}?${qs}`;
 
-  for (const method of ["GET", "POST"]) {
-    try {
-      const opts = { headers: session.headers, timeout };
-      if (method === "POST") {
-        opts.method = "POST";
-        opts.body = qs;
-      }
-      const res = await fetch(url, opts);
-      if (!res.ok) continue;
-      return await res.json();
-    } catch { continue; }
-  }
+  try {
+    const res = await fetch(url, { headers: session.headers, timeout });
+    if (res.ok) {
+      const text = await res.text();
+      if (text.includes("Authorization failed")) return null; // token expired, signal retry
+      return JSON.parse(text);
+    }
+  } catch { /* network error */ }
+
+  // Try POST as fallback
+  try {
+    const res = await fetch(url, { method: "POST", headers: session.headers, body: qs, timeout });
+    if (res.ok) {
+      const text = await res.text();
+      if (text.includes("Authorization failed")) return null;
+      return JSON.parse(text);
+    }
+  } catch { /* network error */ }
+
   throw new Error(`Portal request failed: ${params.action || "unknown"}`);
 }
 
@@ -182,17 +201,6 @@ app.post("/stalker/handshake", async (req, res) => {
 
   try {
     const session = await getSession(portal, mac, { serial });
-    // Auto-call get_profile if device IDs provided (registers device with portal)
-    if (serial || deviceId) {
-      try {
-        const params = { type: "stb", action: "get_profile", auth_second_step: 1,
-          hw_version_2: "8b80dfaa8cf83485567849b7202a79360fc988e3" };
-        if (serial) params.sn = serial;
-        if (deviceId) params.device_id = deviceId;
-        if (deviceId2 || deviceId) params.device_id2 = deviceId2 || deviceId;
-        await portalFetch(session, params);
-      } catch {}
-    }
     res.json({ token: session.token });
   } catch (e) {
     console.error("Handshake error:", e.message);
@@ -207,7 +215,7 @@ app.get("/stalker/api", async (req, res) => {
 
   try {
     const session = await getSession(portal, mac);
-    const data = await portalFetch(session, apiParams);
+    const data = await portalFetchRetry(session, apiParams);
     res.json(data);
   } catch (e) {
     console.error("API proxy error:", e.message);
@@ -223,10 +231,8 @@ app.get("/stalker/channels", async (req, res) => {
   try {
     const session = await getSession(portal, mac);
 
-    const [genreData, chData] = await Promise.all([
-      portalFetch(session, { type: "itv", action: "get_genres" }, 10000),
-      portalFetch(session, { type: "itv", action: "get_all_channels" }, 15000),
-    ]);
+    const genreData = await portalFetchRetry(session, { type: "itv", action: "get_genres" }, 10000);
+    const chData = await portalFetchRetry(session, { type: "itv", action: "get_all_channels" }, 15000);
 
     const genres = genreData?.js || [];
     const genreMap = Object.fromEntries(genres.map(g => [g.id, g.title]));
@@ -257,10 +263,8 @@ app.get("/stalker/vod", async (req, res) => {
 
   try {
     const session = await getSession(portal, mac);
-    const [catData, data] = await Promise.all([
-      portalFetch(session, { type: "vod", action: "get_categories" }, 10000),
-      portalFetch(session, { type: "vod", action: "get_ordered_list", category, page, p: page }),
-    ]);
+    const catData = await portalFetchRetry(session, { type: "vod", action: "get_categories" }, 10000);
+    const data = await portalFetchRetry(session, { type: "vod", action: "get_ordered_list", category, page, p: page });
 
     const cats = catData?.js || [];
     const catMap = Object.fromEntries(cats.map(c => [c.id, c.title]));
@@ -290,7 +294,7 @@ app.get("/stalker/stream", async (req, res) => {
 
   try {
     const session = await getSession(portal, mac);
-    const data = await portalFetch(session, {
+    const data = await portalFetchRetry(session, {
       type: "itv", action: "create_link",
       cmd, series: 0, forced_storage: 0,
       disable_ad: 0, download: 0, force_ch_link_check: 0,
@@ -314,10 +318,8 @@ app.get("/stalker/series", async (req, res) => {
 
   try {
     const session = await getSession(portal, mac);
-    const [catData, data] = await Promise.all([
-      portalFetch(session, { type: "series", action: "get_categories" }, 10000),
-      portalFetch(session, { type: "series", action: "get_ordered_list", category, page, p: page }),
-    ]);
+    const catData = await portalFetchRetry(session, { type: "series", action: "get_categories" }, 10000);
+    const data = await portalFetchRetry(session, { type: "series", action: "get_ordered_list", category, page, p: page });
 
     const cats = catData?.js || [];
     const catMap = Object.fromEntries(cats.map(c => [c.id, c.title]));
@@ -354,7 +356,7 @@ app.get("/stalker/profile", async (req, res) => {
     if (serial) params.sn = serial;
     if (deviceId) params.device_id = deviceId;
     if (deviceId2 || deviceId) params.device_id2 = deviceId2 || deviceId;
-    const data = await portalFetch(session, params);
+    const data = await portalFetchRetry(session, params);
     res.json(data?.js || {});
   } catch (e) {
     console.error("Profile error:", e.message);
@@ -369,7 +371,7 @@ app.get("/stalker/account", async (req, res) => {
 
   try {
     const session = await getSession(portal, mac);
-    const data = await portalFetch(session, {
+    const data = await portalFetchRetry(session, {
       type: "account_info", action: "get_main_info",
     });
     res.json(data?.js || {});
@@ -387,7 +389,7 @@ app.get("/stalker/epg", async (req, res) => {
 
   try {
     const session = await getSession(portal, mac);
-    const data = await portalFetch(session, {
+    const data = await portalFetchRetry(session, {
       type: "itv", action: "get_epg_info", period,
     }, 20000);
 
