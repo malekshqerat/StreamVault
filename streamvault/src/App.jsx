@@ -93,9 +93,9 @@ function parseM3U(text) {
 
 function parseXMLTV(xml) {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
-  const programs = {}; const now = Date.now();
+  const programs = {};
   doc.querySelectorAll("programme").forEach(p => {
-    const ch = p.getAttribute("channel");
+    const ch = p.getAttribute("channel")?.toLowerCase().trim();
     if (!ch) return;
     const start = parseEPGDate(p.getAttribute("start"));
     const stop  = parseEPGDate(p.getAttribute("stop"));
@@ -114,9 +114,17 @@ function parseEPGDate(s) {
 
 function getEPGNow(programs, epgId) {
   if (!programs || !epgId) return null;
-  const list = programs[epgId] || [];
+  const key = epgId.toLowerCase().trim();
+  const list = programs[key] || programs[epgId] || [];
   const now = Date.now();
   return list.find(p => p.start <= now && p.stop > now) || null;
+}
+
+function epgLookup(epgData, ch) {
+  if (!epgData) return null;
+  // Try normalized epgId (xmltv_id), then raw, then channel numeric id
+  const norm = ch.epgId?.toLowerCase().trim();
+  return (norm && epgData[norm]) || (ch.epgId && epgData[ch.epgId]) || (ch.id && epgData[ch.id]) || null;
 }
 
 function fmtTime(sec) {
@@ -416,6 +424,38 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
   color:var(--t2);font-family:'DM Sans',sans-serif;font-size:.8rem;cursor:pointer}
 .btn-confirm{padding:.45rem .9rem;background:var(--accent);border:none;border-radius:7px;
   color:#000;font-family:'Rajdhani',sans-serif;font-size:.88rem;font-weight:700;cursor:pointer}
+
+/* DISCOVER */
+.discover-body{flex:1;overflow-y:auto;padding:1.2rem 1.4rem}
+.disc-hero{background:var(--s1);border:1px solid var(--b1);border-radius:14px;padding:1.6rem;margin-bottom:1.6rem;
+  display:flex;align-items:flex-end;gap:1.2rem;min-height:180px;position:relative;overflow:hidden;cursor:pointer;transition:border-color .2s}
+.disc-hero:hover{border-color:var(--b2)}
+.disc-hero-bg{position:absolute;inset:0;object-fit:cover;width:100%;height:100%;opacity:.2;pointer-events:none}
+.disc-hero-info{position:relative;z-index:1;max-width:600px}
+.disc-hero-title{font-family:'Rajdhani',sans-serif;font-size:1.8rem;font-weight:700;line-height:1.1;
+  text-shadow:0 2px 12px rgba(0,0,0,.8)}
+.disc-hero-meta{font-size:.78rem;color:var(--t2);margin:.3rem 0 .7rem;text-shadow:0 1px 6px rgba(0,0,0,.8)}
+.disc-hero-overview{font-size:.8rem;color:var(--t2);line-height:1.55;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;
+  text-shadow:0 1px 6px rgba(0,0,0,.8)}
+.disc-hero-avail{margin-top:.7rem;font-size:.75rem;color:var(--accent);font-weight:600}
+.disc-section{margin-bottom:1.6rem}
+.disc-row{display:flex;gap:.65rem;overflow-x:auto;padding-bottom:.4rem}
+.disc-row::-webkit-scrollbar{height:3px}
+.disc-card{flex-shrink:0;width:112px;cursor:pointer;transition:transform .2s;position:relative}
+.disc-card:hover{transform:translateY(-3px)}
+.disc-poster{width:112px;aspect-ratio:2/3;object-fit:cover;border-radius:9px;background:var(--s2);display:block;
+  border:1px solid var(--b1)}
+.disc-poster-ph{width:112px;aspect-ratio:2/3;background:var(--s2);border-radius:9px;border:1px solid var(--b1);
+  display:flex;align-items:center;justify-content:center;font-size:2rem}
+.disc-card-title{font-size:.68rem;font-weight:500;margin-top:.38rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.disc-card-meta{font-size:.6rem;color:var(--t3);margin-top:.1rem}
+.disc-rating{position:absolute;top:.4rem;left:.4rem;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);
+  padding:.15rem .38rem;border-radius:4px;font-size:.6rem;font-weight:700;color:var(--accent)}
+.disc-in-lib{position:absolute;bottom:.45rem;right:.45rem;background:var(--accent);border-radius:50%;
+  width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:.6rem;font-weight:700;color:#000}
+.disc-key-prompt{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:1rem;flex:1;text-align:center;padding:2rem}
 `;
 }
 
@@ -461,7 +501,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav }) {
 
     function startHls(u) {
       if (window.Hls?.isSupported()) {
-        const opts = { enableWorker: false, fragLoadingMaxRetry: 4 };
+        const opts = { enableWorker: false, fragLoadingMaxRetry: 2 };
         // On HTTPS pages, proxy HTTP streams through Cloudflare Worker
         if (isMixed(u)) {
           u = streamProxy(u);
@@ -474,6 +514,29 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav }) {
         hls.loadSource(u);
         hls.attachMedia(video);
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
+        hls.on(window.Hls.Events.ERROR, (_, data) => {
+          if (!data.fatal) return;
+          const code = data.response?.code;
+          let title = "Playback Error";
+          let body;
+          if (code === 404) {
+            title = "Stream Not Found (404)";
+            body = "The stream URL returned 404. The channel may be offline, or its URL may have changed. Try reconnecting to refresh the channel list.";
+          } else if (code === 403) {
+            title = "Access Denied (403)";
+            body = "The stream server rejected the request. Your credentials may not have access to this channel.";
+          } else if (code >= 500) {
+            title = `Server Error (${code})`;
+            body = "The stream server returned an error. It may be overloaded or temporarily down.";
+          } else if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+            title = "Network Error";
+            body = "Could not reach the stream server. Check your connection or try again.";
+          } else {
+            body = `HLS error: ${data.details}${code ? ` (HTTP ${code})` : ""}`;
+          }
+          setStreamErr({ icon: "⚠️", title, body });
+          destroyPlayers();
+        });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         video.src = isMixed(u) ? streamProxy(u) : u; video.play().catch(()=>{});
       }
@@ -481,7 +544,8 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav }) {
 
     function startMpegts(u) {
       if (isMixed(u)) {
-        setStreamErr("This live stream uses HTTP and cannot be proxied on an HTTPS page. Use the local version of StreamVault (http://localhost) or ask your provider for HTTPS/HLS streams.");
+        setStreamErr({ icon: "🔒", title: "Mixed Content Blocked",
+          body: "This stream uses HTTP and can't be proxied on an HTTPS page. Open StreamVault on http://localhost instead, or ask your provider for an HTTPS stream." });
         return;
       }
       if (!window.mpegts?.isSupported()) {
@@ -631,11 +695,11 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav }) {
           <video ref={videoRef} className="player-video" controls playsInline />
           {streamErr && (
             <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",
-              background:"rgba(0,0,0,.85)",padding:"2rem",textAlign:"center"}}>
-              <div style={{maxWidth:"380px"}}>
-                <div style={{fontSize:"2rem",marginBottom:".75rem"}}>🔒</div>
-                <div style={{fontSize:".88rem",color:"var(--t1)",fontWeight:500,marginBottom:".5rem"}}>Mixed Content Blocked</div>
-                <div style={{fontSize:".78rem",color:"var(--t2)",lineHeight:1.6}}>{streamErr}</div>
+              background:"rgba(0,0,0,.88)",padding:"2rem",textAlign:"center"}}>
+              <div style={{maxWidth:"400px"}}>
+                <div style={{fontSize:"2.2rem",marginBottom:".75rem"}}>{streamErr.icon}</div>
+                <div style={{fontSize:".9rem",color:"var(--t1)",fontWeight:600,marginBottom:".5rem"}}>{streamErr.title}</div>
+                <div style={{fontSize:".78rem",color:"var(--t2)",lineHeight:1.6}}>{streamErr.body}</div>
               </div>
             </div>
           )}
@@ -1007,6 +1071,7 @@ function FavBtn({ on, onClick, style={} }) {
 // MAIN APP
 // ══════════════════════════════════════════════════════════════════
 const NAV = [
+  { key:"discover",  icon:"✨", label:"Discover",          section:"Watch" },
   { key:"live",      icon:"📺", label:"Live TV",          section:"Watch" },
   { key:"vod",       icon:"🎬", label:"Movies",            section:"Watch" },
   { key:"series",    icon:"📽", label:"Series",            section:"Watch" },
@@ -1057,6 +1122,17 @@ export default function App() {
   const [epgData, setEpgData] = useState(null);
   const [epgLoading, setEpgLoading] = useState(false);
 
+  // ── Stalker lazy-load
+  const [stalkerVodCats,    setStalkerVodCats]    = useState([]); // [{id,title,count}]
+  const [stalkerSeriesCats, setStalkerSeriesCats] = useState([]); // [{id,title,count}]
+  const [loadedCatIds,      setLoadedCatIds]      = useState({ vod: new Set(), series: new Set() });
+  const [catLoading,        setCatLoading]        = useState(false);
+  const fetchingCatRef = useRef(new Set());  // tracks in-progress category fetches
+  const [prefetchProgress, setPrefetchProgress] = useState(null); // {done,total} or null
+
+  // ── TMDB
+  const [tmdbKey, setTmdbKey] = useState(() => localStorage.getItem("sv-tmdb-key") || "");
+
   // ── CSS injection
   useEffect(() => {
     const el = document.getElementById("sv-css") || (() => { const s = document.createElement("style"); s.id="sv-css"; document.head.appendChild(s); return s; })();
@@ -1095,8 +1171,10 @@ export default function App() {
     if (!conn) return;
     if (conn.type === "m3u") {
       setChannels(conn.channels);
+      if (epgURL) loadEPG(epgURL);
     } else if (conn.type === "xtream") {
       fetchLive();
+      if (epgURL) loadEPG(epgURL);
     } else if (conn.type === "stalker") {
       fetchStalkerChannels();
       loadStalkerEPG();
@@ -1170,8 +1248,8 @@ export default function App() {
     finally { setLoading(false); }
   }
 
-  async function fetchStalkerVOD() {
-    if (!conn || conn.type !== "stalker" || vod.length) return;
+  async function fetchStalkerVOD(force = false) {
+    if (!conn || conn.type !== "stalker" || (!force && vod.length)) return;
     setLoading(true);
     try {
       const res = await fetch(`${PROXY}/stalker/vod?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
@@ -1187,8 +1265,8 @@ export default function App() {
     finally { setLoading(false); }
   }
 
-  async function fetchStalkerSeries() {
-    if (!conn || conn.type !== "stalker" || series.length) return;
+  async function fetchStalkerSeries(force = false) {
+    if (!conn || conn.type !== "stalker" || (!force && series.length)) return;
     setLoading(true);
     try {
       const res = await fetch(`${PROXY}/stalker/series?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
@@ -1200,6 +1278,86 @@ export default function App() {
       })));
     } catch(e) { console.error("Stalker series error:", e); }
     finally { setLoading(false); }
+  }
+
+  // ── Load category list for Stalker VOD / Series (fast, single request + 6h cache)
+  async function loadStalkerCats(sec) {
+    const CACHE_KEY = `sv-s-${sec}cats-${conn.server}`;
+    const TTL = 6 * 3600 * 1000;
+    let cats = null;
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Date.now() - parsed.ts < TTL) cats = parsed.cats;
+      }
+    } catch {}
+    if (!cats) {
+      setLoading(true);
+      try {
+        const res  = await fetch(`${PROXY}/stalker/${sec}/categories?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        cats = data.categories || [];
+        localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), cats }));
+      } catch(e) { console.error(`Stalker ${sec} cats:`, e); return; }
+      finally { setLoading(false); }
+    }
+    sec === "vod" ? setStalkerVodCats(cats) : setStalkerSeriesCats(cats);
+    if (cats.length) {
+      setCat(cats[0].title);
+      loadStalkerCatItems(sec, cats[0].id, cats[0].title);
+      // Option F: background prefetch remaining categories
+      prefetchRemainingStalkerCats(sec, cats);
+    }
+  }
+
+  // ── Load items for one Stalker category (sequential fetch + 6h per-cat cache)
+  async function loadStalkerCatItems(sec, catId, catTitle, silent = false) {
+    const refKey = `${sec}-${catId}`;
+    if (fetchingCatRef.current.has(refKey)) return;
+    fetchingCatRef.current.add(refKey);
+    const CACHE_KEY = `sv-s-${sec}item-${conn.server}-${catId}`;
+    const TTL = 6 * 3600 * 1000;
+    const applyItems = (items) => {
+      const mapped = items.map(item => {
+        const raw = (item.url || "").replace(/^ffmpeg\s+/, "").trim();
+        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
+        return { ...item, group: catTitle, _stalkerCmd: item.url, url: isDirect ? raw : null };
+      });
+      if (sec === "vod") setVod(prev => [...prev.filter(v => v.group !== catTitle), ...mapped]);
+      else setSeries(prev => [...prev.filter(s => s.group !== catTitle), ...mapped]);
+      setLoadedCatIds(prev => ({ ...prev, [sec]: new Set([...prev[sec], catId]) }));
+    };
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const { ts, items } = JSON.parse(raw);
+        if (Date.now() - ts < TTL) { applyItems(items); fetchingCatRef.current.delete(refKey); return; }
+      }
+    } catch {}
+    if (!silent) setCatLoading(true);
+    try {
+      const res  = await fetch(`${PROXY}/stalker/${sec}?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cat=${catId}`);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const items = data.items || [];
+      applyItems(items);
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), items }));
+    } catch(e) { console.error(`Stalker ${sec} cat items:`, e); }
+    finally { if (!silent) setCatLoading(false); fetchingCatRef.current.delete(refKey); }
+  }
+
+  // ── Option F: background prefetch remaining categories sequentially
+  async function prefetchRemainingStalkerCats(sec, cats) {
+    setPrefetchProgress({ done: 0, total: cats.length });
+    let done = 0;
+    for (const cat of cats) {
+      await loadStalkerCatItems(sec, cat.id, cat.title, true);
+      done++;
+      setPrefetchProgress({ done, total: cats.length });
+    }
+    setPrefetchProgress(null);
   }
 
   async function resolveStalkerStream(item) {
@@ -1218,6 +1376,7 @@ export default function App() {
       const res = await proxyFetch(url);
       const text = await res.text();
       setEpgData(parseXMLTV(text));
+      setEpgURL(url);
       db.set("sv-epgURL", url);
     } catch(e) { console.error("EPG error:", e); }
     finally { setEpgLoading(false); }
@@ -1235,10 +1394,16 @@ export default function App() {
   }
 
   function switchSection(s) {
-    setSection(s); setCat("All"); setSearch(""); setPage(1);
-    if (s==="vod") { conn?.type==="stalker" ? fetchStalkerVOD() : fetchVOD(); }
-    else if (s==="series") { conn?.type==="stalker" ? fetchStalkerSeries() : fetchSeries(); }
-    else if (s==="search") setSection("search");
+    setSection(s); setSearch(""); setPage(1);
+    if (s === "vod") {
+      if (conn?.type === "stalker") { setCat(null); loadStalkerCats("vod"); }
+      else { setCat("All"); fetchVOD(); }
+    } else if (s === "series") {
+      if (conn?.type === "stalker") { setCat(null); loadStalkerCats("series"); }
+      else { setCat("All"); fetchSeries(); }
+    } else {
+      setCat("All");
+    }
   }
 
   // ── favorites
@@ -1317,6 +1482,9 @@ export default function App() {
 
   function disconnect() {
     setConn(null); setChannels([]); setVod([]); setSeries([]);
+    setStalkerVodCats([]); setStalkerSeriesCats([]);
+    setLoadedCatIds({ vod: new Set(), series: new Set() });
+    fetchingCatRef.current.clear(); setPrefetchProgress(null);
     setSection("live"); setPlaying(null); setCat("All");
   }
 
@@ -1324,14 +1492,19 @@ export default function App() {
   const getItems = useCallback((sec) => sec==="live"?channels : sec==="vod"?vod : series, [channels, vod, series]);
 
   const curCatsAll = useMemo(() => {
+    if (conn?.type === "stalker" && (section === "vod" || section === "series")) {
+      const apiCats = section === "vod" ? stalkerVodCats : stalkerSeriesCats;
+      if (apiCats.length) return apiCats.map(c => c.title);
+    }
     const items = getItems(section);
     return ["All", ...new Set(items.map(i=>i.group).filter(Boolean))];
-  }, [getItems, section]);
+  }, [conn, section, stalkerVodCats, stalkerSeriesCats, getItems]);
 
   const curItemsAll = useMemo(() => {
+    if (!cat) return [];
     const items = getItems(section);
     return items.filter(item => {
-      const catMatch = cat==="All" || item.group===cat;
+      const catMatch = cat === "All" || item.group === cat;
       const searchMatch = !search || item.name?.toLowerCase().includes(search.toLowerCase());
       return catMatch && searchMatch;
     });
@@ -1362,7 +1535,7 @@ export default function App() {
     </>
   );
 
-  const LABEL = {live:"Live TV",vod:"Movies",series:"Series",favs:"Favorites",continue:"Continue Watching",epg:"TV Guide",search:"Global Search",hls:"Direct Play"};
+  const LABEL = {discover:"Discover",live:"Live TV",vod:"Movies",series:"Series",favs:"Favorites",continue:"Continue Watching",epg:"TV Guide",search:"Global Search",hls:"Direct Play"};
   const activeProfile_obj = profiles.find(p=>p.id===activeProfile) || profiles[0];
   const curCats = ["live","vod","series"].includes(section) ? curCatsAll : [];
   const curItems = ["live","vod","series"].includes(section) ? curItemsAll : [];
@@ -1441,11 +1614,35 @@ export default function App() {
             <span style={{fontSize:".73rem"}}><span className="live-dot" />LIVE</span>
           )}
           {["live","vod","series"].includes(section) && (
-            <div className="c-search-wrap">
-              <span className="c-search-icon">🔍</span>
-              <input className="c-search" placeholder={`Search ${LABEL[section]}…`}
-                value={search} onChange={e => setSearch(e.target.value)} />
-            </div>
+            <>
+              {conn?.type === "stalker" && (
+                <>
+                  <button className="c-btn" title="Reload from portal" onClick={() => {
+                    if (section === "live") { setChannels([]); fetchStalkerChannels(); }
+                    else if (section === "vod" || section === "series") {
+                      localStorage.removeItem(`sv-s-${section}cats-${conn.server}`);
+                      setVod(section === "vod" ? [] : vod);
+                      setSeries(section === "series" ? [] : series);
+                      if (section === "vod") setStalkerVodCats([]); else setStalkerSeriesCats([]);
+                      setLoadedCatIds(prev => ({ ...prev, [section]: new Set() }));
+                      fetchingCatRef.current.clear();
+                      setCat(null);
+                      loadStalkerCats(section);
+                    }
+                  }}>↺ Refresh</button>
+                  {prefetchProgress && (
+                    <span style={{fontSize:".68rem",color:"var(--t3)",whiteSpace:"nowrap"}}>
+                      Loading {prefetchProgress.done}/{prefetchProgress.total} categories…
+                    </span>
+                  )}
+                </>
+              )}
+              <div className="c-search-wrap">
+                <span className="c-search-icon">🔍</span>
+                <input className="c-search" placeholder={`Search ${LABEL[section]}…`}
+                  value={search} onChange={e => setSearch(e.target.value)} />
+              </div>
+            </>
           )}
           {section==="search" && (
             <div className="c-search-wrap" style={{flex:1}}>
@@ -1460,6 +1657,8 @@ export default function App() {
         {/* Body */}
         {loading ? (
           <div className="loading"><div className="spinner" /><span>Loading {LABEL[section]}…</span></div>
+        ) : section==="discover" ? (
+          <DiscoverView tmdbKey={tmdbKey} setTmdbKey={setTmdbKey} vod={vod} series={series} onPlay={playItem} />
         ) : section==="hls" ? (
           <DirectHLSView />
         ) : section==="epg" ? (
@@ -1482,7 +1681,15 @@ export default function App() {
                     <div key={c}
                       className={`cat ${cat===c?"on":""} ${hidden?"cat-hidden":""}`}
                       title={c}
-                      onClick={() => !hidden && setCat(c)}
+                      onClick={() => {
+                        if (hidden) return;
+                        setCat(c);
+                        if (conn?.type === "stalker" && (section === "vod" || section === "series")) {
+                          const apiCats = section === "vod" ? stalkerVodCats : stalkerSeriesCats;
+                          const catObj = apiCats.find(sc => sc.title === c);
+                          if (catObj) loadStalkerCatItems(section, catObj.id, c);
+                        }
+                      }}
                       onContextMenu={e => {
                         e.preventDefault();
                         if (c !== "All") setCtx({x:e.clientX, y:e.clientY, sec:section, catName:c});
@@ -1494,7 +1701,19 @@ export default function App() {
               </div>
             )}
 
-            {curItems.length === 0 ? (
+            {cat === null && conn?.type === "stalker" && (section === "vod" || section === "series") ? (
+              <div className="empty">
+                <div className="empty-icon">📂</div>
+                <div className="empty-t">Select a category</div>
+                <div className="empty-s">Choose a category from the list above to load content.</div>
+              </div>
+            ) : catLoading && curItems.length === 0 ? (
+              <div className="empty">
+                <div className="empty-icon" style={{animation:"spin 1s linear infinite"}}>⏳</div>
+                <div className="empty-t">Loading {cat}…</div>
+                <div className="empty-s">Fetching items from portal.</div>
+              </div>
+            ) : curItems.length === 0 ? (
               <div className="empty">
                 <div className="empty-icon">{section==="live"?"📺":section==="vod"?"🎬":"📽"}</div>
                 <div className="empty-t">No content found</div>
@@ -1728,45 +1947,70 @@ function GlobalSearch({ results, query, onPlay, toggleFav, isFav }) {
 
 function EPGView({ channels, epgData, epgURL, setEpgURL, epgLoading, loadEPG, onPlay }) {
   const [urlInput, setUrlInput] = useState(epgURL||"");
-  const hours = Array.from({length:8},(_,i) => `${String(6+i).padStart(2,"0")}:00`);
-  const SHOW_NAMES = ["Morning News","Talk Show","Documentary","Movie","Sports","News","Drama","Late Night"];
+  const [search, setSearch] = useState("");
+
+  // Build 8-slot time window centred on current hour
+  const slots = useMemo(() => {
+    const nowH = new Date().getHours();
+    const startH = Math.max(0, nowH - 1);
+    return Array.from({length:8}, (_,i) => {
+      const h = startH + i;
+      const base = new Date(); base.setHours(h, 0, 0, 0);
+      return { label: `${String(h % 24).padStart(2,"0")}:00`, startMs: base.getTime(), endMs: base.getTime() + 3600000 };
+    });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const filteredChannels = useMemo(() => {
+    if (!search) return channels;
+    const q = search.toLowerCase();
+    return channels.filter(ch => ch.name?.toLowerCase().includes(q));
+  }, [channels, search]);
 
   return (
     <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
       <div className="epg-top">
-        <input className="fi" style={{flex:1}} placeholder="XMLTV EPG URL (e.g. http://provider.com/epg.xml)" value={urlInput}
+        <input className="fi" style={{flex:"1 1 260px",minWidth:0}} placeholder="XMLTV EPG URL (e.g. http://provider.com/epg.xml)" value={urlInput}
           onChange={e=>setUrlInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&loadEPG(urlInput)} />
         <button className="btn-go" onClick={()=>loadEPG(urlInput)} disabled={epgLoading} style={{padding:".4rem .9rem",fontSize:".82rem"}}>
           {epgLoading ? "Loading…" : "Load EPG"}
         </button>
+        {channels.length > 0 && (
+          <input className="fi" style={{width:"160px"}} placeholder="Filter channels…"
+            value={search} onChange={e=>setSearch(e.target.value)} />
+        )}
       </div>
       {!channels.length ? (
         <div className="empty"><div className="empty-icon">📋</div><div className="empty-t">No channels loaded</div><div className="empty-s">Connect via Xtream Codes or M3U to populate TV Guide.</div></div>
+      ) : !epgData ? (
+        <div className="empty">
+          <div className="empty-icon">📅</div>
+          <div className="empty-t">No EPG data</div>
+          <div className="empty-s">Paste your XMLTV EPG URL above and click Load EPG.<br/>Your provider may supply one — check their portal or dashboard.</div>
+        </div>
       ) : (
         <div className="epg-outer">
           <div className="epg-table">
             <div className="epg-head-row">
               <div className="epg-ch-col" style={{height:"32px"}} />
-              {hours.map(h => <div key={h} className="epg-time-slot">{h}</div>)}
+              {slots.map(s => <div key={s.label} className="epg-time-slot">{s.label}</div>)}
             </div>
-            {channels.slice(0,40).map((ch,i) => {
-              const epgCh = epgData?.[ch.epgId];
+            {filteredChannels.map((ch,i) => {
+              const epgCh = epgLookup(epgData, ch);
               const now = Date.now();
               return (
-                <div key={i} className="epg-row">
-                  <div className="epg-ch-cell">
+                <div key={ch.id||i} className="epg-row">
+                  <div className="epg-ch-cell" onClick={()=>onPlay(ch)} style={{cursor:"pointer"}}>
                     {ch.logo && <img className="epg-ch-logo" src={ch.logo} alt="" onError={e=>e.target.style.display="none"} />}
                     <span className="epg-ch-name" title={ch.name}>{ch.name}</span>
                   </div>
-                  {hours.map((h, j) => {
-                    const slotStart = new Date(); slotStart.setHours(6+j,0,0,0);
-                    const slotEnd   = new Date(); slotEnd.setHours(7+j,0,0,0);
-                    const prog = epgCh?.find(p => p.start < slotEnd.getTime() && p.stop > slotStart.getTime());
-                    const isNow = slotStart.getTime() <= now && slotEnd.getTime() > now;
+                  {slots.map((s, j) => {
+                    const prog = epgCh?.find(p => p.start < s.endMs && p.stop > s.startMs);
+                    const isNow = s.startMs <= now && s.endMs > now;
                     return (
-                      <div key={j} className={`epg-prog ${isNow?"now":""}`} onClick={()=>onPlay(ch)}>
-                        <div className="epg-prog-t">{prog?.title || SHOW_NAMES[j]}</div>
-                        <div className="epg-prog-s">{h} – {hours[j+1]||"14:00"}</div>
+                      <div key={j} className={`epg-prog ${isNow?"now":""}`} onClick={()=>onPlay(ch)}
+                        title={prog ? `${prog.title}\n${new Date(prog.start).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})} – ${new Date(prog.stop).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}` : ""}>
+                        <div className="epg-prog-t">{prog?.title || <span style={{opacity:.35}}>—</span>}</div>
+                        <div className="epg-prog-s">{s.label}</div>
                       </div>
                     );
                   })}
@@ -1809,6 +2053,267 @@ function DirectHLSView() {
         ))}
       </div>
       {playing && <Player item={playing} onClose={()=>setPlaying(null)} />}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════
+// DISCOVER (TMDB)
+// ══════════════════════════════════════════════════════════════════
+const TMDB_IMG = "https://image.tmdb.org/t/p/";
+
+function normalizeTitle(s) {
+  return (s || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
+  const [keyInput, setKeyInput]           = useState(tmdbKey);
+  const [trending, setTrending]           = useState([]);
+  const [popularMovies, setPopularMovies] = useState([]);
+  const [popularTV, setPopularTV]         = useState([]);
+  const [loading, setLoading]             = useState(false);
+  const [err, setErr]                     = useState("");
+  const [picker, setPicker]               = useState(null); // { tmdbItem, matches[] }
+
+  useEffect(() => { if (tmdbKey) loadAll(tmdbKey); }, [tmdbKey]);
+
+  async function loadAll(key) {
+    setLoading(true); setErr("");
+    try {
+      const base = "https://api.themoviedb.org/3";
+      const [t, pm, ptv] = await Promise.all([
+        fetch(`${base}/trending/all/week?api_key=${key}&language=en-US`).then(r => r.json()),
+        fetch(`${base}/movie/popular?api_key=${key}&language=en-US`).then(r => r.json()),
+        fetch(`${base}/tv/popular?api_key=${key}&language=en-US`).then(r => r.json()),
+      ]);
+      if (t.success === false) throw new Error(t.status_message || "Invalid API key");
+      setTrending(t.results || []);
+      setPopularMovies(pm.results || []);
+      setPopularTV(ptv.results || []);
+    } catch(e) {
+      setErr(e.message);
+      localStorage.removeItem("sv-tmdb-key");
+      setTmdbKey("");
+    } finally { setLoading(false); }
+  }
+
+  function saveKey() {
+    const k = keyInput.trim();
+    if (!k) return;
+    localStorage.setItem("sv-tmdb-key", k);
+    setTmdbKey(k);
+  }
+
+  // Return ALL library items that match the TMDB title
+  const findAllInLibrary = useCallback((tmdbItem) => {
+    const title = normalizeTitle(tmdbItem.title || tmdbItem.name);
+    if (!title || title.length < 2) return [];
+    return [...vod, ...series].filter(item => {
+      const n = normalizeTitle(item.name);
+      if (!n) return false;
+      if (n === title) return true;
+      // partial match only if both names are long enough to avoid false positives
+      const minLen = Math.min(n.length, title.length);
+      if (minLen >= 6 && (n.includes(title) || title.includes(n))) return true;
+      return false;
+    });
+  }, [vod, series]);
+
+  function handleCardClick(tmdbItem) {
+    const matches = findAllInLibrary(tmdbItem);
+    if (matches.length === 1) {
+      onPlay(matches[0]);
+    } else {
+      // 0 matches → show "not found"; 2+ matches → show picker
+      setPicker({ tmdbItem, matches });
+    }
+  }
+
+  if (!tmdbKey) {
+    return (
+      <div className="disc-key-prompt">
+        <div style={{fontSize:"2.5rem"}}>✨</div>
+        <div style={{fontSize:"1rem",fontWeight:600}}>Discover Trending Content</div>
+        <div style={{fontSize:".82rem",color:"var(--t2)",maxWidth:"360px",lineHeight:1.6}}>
+          See what's trending on TMDB and find matches in your library.{" "}
+          <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer"
+            style={{color:"var(--accent)"}}>Get a free API key →</a>
+        </div>
+        {err && <div className="err" style={{maxWidth:"360px"}}>{err}</div>}
+        <div style={{display:"flex",gap:".5rem",width:"100%",maxWidth:"380px"}}>
+          <input className="fi" placeholder="Paste TMDB v3 API key…" value={keyInput}
+            onChange={e=>setKeyInput(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&saveKey()} />
+          <button className="btn-go" style={{padding:".62rem .9rem",fontSize:".84rem"}} onClick={saveKey}>Go</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) return <div className="loading"><div className="spinner" /><span>Loading trending…</span></div>;
+
+  const hero = trending[0];
+
+  function TMDBCard({ item }) {
+    const matches = findAllInLibrary(item);
+    const inLib   = matches.length > 0;
+    const poster  = item.poster_path ? `${TMDB_IMG}w185${item.poster_path}` : null;
+    const year    = (item.release_date || item.first_air_date || "").slice(0, 4);
+    const rating  = item.vote_average ? item.vote_average.toFixed(1) : null;
+    const title   = item.title || item.name || "Unknown";
+    return (
+      <div className="disc-card" onClick={() => handleCardClick(item)} title={title}>
+        {poster
+          ? <img className="disc-poster" src={poster} alt={title} />
+          : <div className="disc-poster-ph">{item.media_type === "tv" ? "📺" : "🎬"}</div>}
+        {rating && <div className="disc-rating">★{rating}</div>}
+        {inLib && <div className="disc-in-lib" title={`${matches.length} match${matches.length>1?"es":""} in library`}>
+          {matches.length > 1 ? matches.length : "▶"}
+        </div>}
+        <div className="disc-card-title">{title}</div>
+        <div className="disc-card-meta">{[year, item.media_type === "tv" ? "TV" : "Film"].filter(Boolean).join(" · ")}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="discover-body">
+      {/* Hero */}
+      {hero && (() => {
+        const heroMatches = findAllInLibrary(hero);
+        return (
+          <div className="disc-hero" onClick={() => handleCardClick(hero)}>
+            {hero.backdrop_path && (
+              <img className="disc-hero-bg" src={`${TMDB_IMG}w1280${hero.backdrop_path}`} alt="" />
+            )}
+            <div className="disc-hero-info">
+              <div className="disc-hero-title">{hero.title || hero.name}</div>
+              <div className="disc-hero-meta">
+                {[(hero.release_date||hero.first_air_date||"").slice(0,4),
+                  hero.vote_average && `★ ${hero.vote_average.toFixed(1)}`,
+                  hero.media_type === "tv" ? "TV Series" : "Movie"
+                ].filter(Boolean).join(" · ")}
+              </div>
+              {hero.overview && <div className="disc-hero-overview">{hero.overview}</div>}
+              {heroMatches.length > 0 && (
+                <div className="disc-hero-avail">
+                  {heroMatches.length === 1 ? "▶ In your library — click to play" : `▶ ${heroMatches.length} matches in your library — click to choose`}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Trending This Week */}
+      <div className="disc-section">
+        <div className="section-label">Trending This Week</div>
+        <div className="disc-row">
+          {trending.map((item, i) => <TMDBCard key={item.id || i} item={item} />)}
+        </div>
+      </div>
+
+      {/* Popular Movies */}
+      <div className="disc-section">
+        <div className="section-label">Popular Movies</div>
+        <div className="disc-row">
+          {popularMovies.map((item, i) => <TMDBCard key={item.id || i} item={{...item, media_type:"movie"}} />)}
+        </div>
+      </div>
+
+      {/* Popular TV */}
+      <div className="disc-section">
+        <div className="section-label">Popular TV Shows</div>
+        <div className="disc-row">
+          {popularTV.map((item, i) => <TMDBCard key={item.id || i} item={{...item, media_type:"tv"}} />)}
+        </div>
+      </div>
+
+      <div style={{display:"flex",justifyContent:"flex-end",paddingTop:".4rem"}}>
+        <button className="btn-sm" style={{width:"auto"}}
+          onClick={() => { localStorage.removeItem("sv-tmdb-key"); setTmdbKey(""); setKeyInput(""); }}>
+          Change API Key
+        </button>
+      </div>
+
+      {/* Picker / Not-found modal */}
+      {picker && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.82)",zIndex:600,
+          display:"flex",alignItems:"center",justifyContent:"center",backdropFilter:"blur(8px)"}}
+          onClick={() => setPicker(null)}>
+          <div style={{background:"var(--s1)",border:"1px solid var(--b2)",borderRadius:"14px",
+            padding:"1.5rem",width:"100%",maxWidth:"420px",maxHeight:"72vh",overflow:"auto"}}
+            onClick={e => e.stopPropagation()}>
+
+            {/* TMDB title + meta */}
+            <div style={{display:"flex",gap:"1rem",marginBottom:"1.2rem",alignItems:"flex-start"}}>
+              {picker.tmdbItem.poster_path && (
+                <img src={`${TMDB_IMG}w92${picker.tmdbItem.poster_path}`}
+                  style={{width:54,borderRadius:7,flexShrink:0,border:"1px solid var(--b2)"}} alt="" />
+              )}
+              <div>
+                <div style={{fontFamily:"'Rajdhani',sans-serif",fontWeight:700,fontSize:"1.15rem",lineHeight:1.2}}>
+                  {picker.tmdbItem.title || picker.tmdbItem.name}
+                </div>
+                <div style={{fontSize:".72rem",color:"var(--t2)",marginTop:".25rem"}}>
+                  {[(picker.tmdbItem.release_date||picker.tmdbItem.first_air_date||"").slice(0,4),
+                    picker.tmdbItem.media_type==="tv" ? "TV Series" : "Movie"
+                  ].filter(Boolean).join(" · ")}
+                </div>
+              </div>
+            </div>
+
+            {picker.matches.length === 0 ? (
+              <div style={{textAlign:"center",padding:"1.4rem 0"}}>
+                <div style={{fontSize:"2rem",marginBottom:".5rem"}}>🔍</div>
+                <div style={{fontSize:".9rem",fontWeight:600}}>Not in your library</div>
+                <div style={{fontSize:".78rem",color:"var(--t2)",marginTop:".4rem",lineHeight:1.55}}>
+                  Load your Movies or Series first — connect via Xtream, M3U, or Stalker, then switch to the Movies/Series tab.
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{fontSize:".68rem",color:"var(--t3)",textTransform:"uppercase",
+                  letterSpacing:".1em",fontWeight:700,marginBottom:".6rem"}}>
+                  {picker.matches.length} match{picker.matches.length > 1 ? "es" : ""} in your library
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:".4rem"}}>
+                  {picker.matches.map((item, i) => (
+                    <div key={item.id || i}
+                      style={{display:"flex",alignItems:"center",gap:".75rem",padding:".6rem .8rem",
+                        background:"var(--s2)",border:"1px solid var(--b2)",borderRadius:"9px",
+                        cursor:"pointer",transition:"border-color .15s"}}
+                      onClick={() => { onPlay(item); setPicker(null); }}
+                      onMouseEnter={e => e.currentTarget.style.borderColor="var(--accent)"}
+                      onMouseLeave={e => e.currentTarget.style.borderColor="var(--b2)"}>
+                      {item.logo
+                        ? <img src={item.logo} style={{width:38,height:38,objectFit:"contain",
+                            borderRadius:5,background:"var(--s3)",flexShrink:0}} alt="" />
+                        : <div style={{width:38,height:38,background:"var(--s3)",borderRadius:5,
+                            display:"flex",alignItems:"center",justifyContent:"center",
+                            flexShrink:0,fontSize:".9rem"}}>
+                            {item.type === "series" ? "📽" : "🎬"}
+                          </div>}
+                      <div style={{flex:1,overflow:"hidden"}}>
+                        <div style={{fontSize:".82rem",fontWeight:500,overflow:"hidden",
+                          textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}</div>
+                        <div style={{fontSize:".65rem",color:"var(--t3)",marginTop:".15rem"}}>
+                          {item.group}{item.year ? ` · ${item.year}` : ""}
+                        </div>
+                      </div>
+                      <div style={{fontSize:".8rem",color:"var(--accent)",flexShrink:0}}>▶</div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <div style={{marginTop:"1.1rem",textAlign:"right"}}>
+              <button className="btn-cancel" onClick={() => setPicker(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

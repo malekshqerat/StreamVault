@@ -256,31 +256,77 @@ app.get("/stalker/channels", async (req, res) => {
   }
 });
 
-// ── GET /stalker/vod
-app.get("/stalker/vod", async (req, res) => {
-  const { portal, mac, page = 1, category = "*" } = req.query;
-  if (!portal || !mac) return res.status(400).json({ error: "portal and mac required" });
+// ── Fetch all paginated items for a given Stalker type (vod/series)
+// Fetch all pages for a specific category (sequential, safe, stops on empty page).
+async function fetchAllPages(session, type, category, maxItems = 500) {
+  const all = [];
 
+  for (let page = 1; all.length < maxItems; page++) {
+    let data;
+    try {
+      data = await portalFetchRetry(session,
+        { type, action: "get_ordered_list", category, page, p: page }, 20000);
+    } catch (e) {
+      console.warn(`fetchAllPages ${type} cat=${category} page=${page}: ${e.message}`);
+      break;
+    }
+
+    const items = data?.js?.data;
+    if (!items || !items.length) break;
+
+    all.push(...items);
+
+    const declaredTotal = parseInt(data.js.total_items || data.js.results_num || 0);
+    if (declaredTotal > 0 && all.length >= declaredTotal) break;
+
+    const declaredPages = parseInt(data.js.total_pages || data.js.pages_count || 0);
+    if (declaredPages > 0 && page >= declaredPages) break;
+  }
+
+  return all;
+}
+
+// ── GET /stalker/vod/categories  — returns category list only (fast, single request)
+app.get("/stalker/vod/categories", async (req, res) => {
+  const { portal, mac } = req.query;
+  if (!portal || !mac) return res.status(400).json({ error: "portal and mac required" });
   try {
     const session = await getSession(portal, mac);
     const catData = await portalFetchRetry(session, { type: "vod", action: "get_categories" }, 10000);
-    const data = await portalFetchRetry(session, { type: "vod", action: "get_ordered_list", category, page, p: page });
+    const categories = (catData?.js || []).map(c => ({
+      id:    String(c.id),
+      title: c.title,
+      count: parseInt(c.count || c.videos_count || c.censored_count || 0),
+    }));
+    res.json({ categories });
+  } catch (e) {
+    console.error("VOD categories error:", e.message);
+    res.status(502).json({ error: e.message });
+  }
+});
 
-    const cats = catData?.js || [];
-    const catMap = Object.fromEntries(cats.map(c => [c.id, c.title]));
+// ── GET /stalker/vod?cat=ID  — returns items for one category (lazy load)
+app.get("/stalker/vod", async (req, res) => {
+  const { portal, mac, cat } = req.query;
+  if (!portal || !mac) return res.status(400).json({ error: "portal and mac required" });
+  if (!cat)            return res.status(400).json({ error: "cat (category id) required" });
 
-    const items = (data?.js?.data || []).map(v => ({
-      id:    v.id,
-      name:  v.name,
-      logo:  v.screenshot_uri || v.cover || null,
-      year:  v.year,
+  try {
+    const session  = await getSession(portal, mac);
+    const rawItems = await fetchAllPages(session, "vod", cat);
+
+    const items = rawItems.map(v => ({
+      id:     v.id,
+      name:   v.name,
+      logo:   v.screenshot_uri || v.cover || null,
+      year:   v.year,
       rating: v.rating_imdb || v.rating || null,
-      url:   v.cmd || null,
-      group: catMap[v.category_id] || "Other",
-      type:  "vod",
+      url:    v.cmd || null,
+      type:   "vod",
     }));
 
-    res.json({ items, total: data?.js?.total_items, page: data?.js?.cur_page });
+    console.log(`VOD cat=${cat} loaded: ${items.length} items`);
+    res.json({ items, total: items.length });
   } catch (e) {
     console.error("VOD error:", e.message);
     res.status(502).json({ error: e.message });
@@ -311,30 +357,46 @@ app.get("/stalker/stream", async (req, res) => {
   }
 });
 
-// ── GET /stalker/series
-app.get("/stalker/series", async (req, res) => {
-  const { portal, mac, page = 1, category = "*" } = req.query;
+// ── GET /stalker/series/categories
+app.get("/stalker/series/categories", async (req, res) => {
+  const { portal, mac } = req.query;
   if (!portal || !mac) return res.status(400).json({ error: "portal and mac required" });
-
   try {
     const session = await getSession(portal, mac);
     const catData = await portalFetchRetry(session, { type: "series", action: "get_categories" }, 10000);
-    const data = await portalFetchRetry(session, { type: "series", action: "get_ordered_list", category, page, p: page });
+    const categories = (catData?.js || []).map(c => ({
+      id:    String(c.id),
+      title: c.title,
+      count: parseInt(c.count || c.videos_count || c.censored_count || 0),
+    }));
+    res.json({ categories });
+  } catch (e) {
+    console.error("Series categories error:", e.message);
+    res.status(502).json({ error: e.message });
+  }
+});
 
-    const cats = catData?.js || [];
-    const catMap = Object.fromEntries(cats.map(c => [c.id, c.title]));
+// ── GET /stalker/series?cat=ID
+app.get("/stalker/series", async (req, res) => {
+  const { portal, mac, cat } = req.query;
+  if (!portal || !mac) return res.status(400).json({ error: "portal and mac required" });
+  if (!cat)            return res.status(400).json({ error: "cat (category id) required" });
 
-    const items = (data?.js?.data || []).map(s => ({
-      id:    s.id,
-      name:  s.name,
-      logo:  s.screenshot_uri || s.cover || null,
-      year:  s.year,
+  try {
+    const session  = await getSession(portal, mac);
+    const rawItems = await fetchAllPages(session, "series", cat);
+
+    const items = rawItems.map(s => ({
+      id:     s.id,
+      name:   s.name,
+      logo:   s.screenshot_uri || s.cover || null,
+      year:   s.year,
       rating: s.rating_imdb || s.rating || null,
-      group: catMap[s.category_id] || "Other",
-      type:  "series",
+      type:   "series",
     }));
 
-    res.json({ items, total: data?.js?.total_items, page: data?.js?.cur_page });
+    console.log(`Series cat=${cat} loaded: ${items.length} items`);
+    res.json({ items, total: items.length });
   } catch (e) {
     console.error("Series error:", e.message);
     res.status(502).json({ error: e.message });
