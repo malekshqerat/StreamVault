@@ -473,6 +473,26 @@ app.get("/stalker/epg", async (req, res) => {
   }
 });
 
+// ── GET /stream?url=... — streaming proxy for live IPTV streams (pipes body, preserves IP-bound tokens)
+app.get("/stream", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: "url required" });
+  try {
+    const upstream = await fetch(url, {
+      headers: { "User-Agent": "StreamVault/1.0" },
+      redirect: "follow",
+    });
+    if (!upstream.ok) return res.status(upstream.status).end();
+    const ct = upstream.headers.get("content-type");
+    res.set("Access-Control-Allow-Origin", "*");
+    if (ct) res.set("Content-Type", ct);
+    upstream.body.pipe(res);
+  } catch (e) {
+    console.error("Stream proxy error:", e.message);
+    if (!res.headersSent) res.status(502).json({ error: e.message });
+  }
+});
+
 // ── GET /proxy?url=... — generic CORS proxy for Xtream API and M3U fetches
 app.get("/proxy", async (req, res) => {
   const { url } = req.query;

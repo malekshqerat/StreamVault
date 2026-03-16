@@ -487,7 +487,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 // ══════════════════════════════════════════════════════════════════
 // PLAYER COMPONENT (TiviMate-level keyboard + OSD + PiP + quick-ch)
 // ══════════════════════════════════════════════════════════════════
-function Player({ item, channelList, epgData, onClose, onFav, isFav }) {
+function Player({ item, channelList, epgData, onClose, onFav, isFav, connType }) {
   const videoRef   = useRef(null);
   const hlsRef     = useRef(null);
   const mpegtsRef  = useRef(null);
@@ -515,7 +515,11 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav }) {
   const [streamErr, setStreamErr] = useState(null);
 
   const isMixed = location.protocol === "https:" ? (u) => u?.startsWith("http://") : () => false;
-  const streamProxy = (u) => `/stream?url=${encodeURIComponent(u)}`;
+  // Stalker/Xtream streams have IP-bound tokens — must proxy through local proxy (same IP that got the token)
+  // Other streams use Cloudflare Worker /stream proxy
+  const streamProxy = (u) => connType === "stalker" || connType === "xtream"
+    ? `${PROXY}/stream?url=${encodeURIComponent(u)}`
+    : `/stream?url=${encodeURIComponent(u)}`;
 
   function initPlayer(url) {
     const video = videoRef.current;
@@ -1814,6 +1818,7 @@ export default function App() {
           toggleFav={toggleFav}
           onFav={toggleFav}
           isFav={isFav}
+          connType={conn?.type}
         />
       )}
 
