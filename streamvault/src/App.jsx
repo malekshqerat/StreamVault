@@ -591,11 +591,22 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
       s.src = src; s.onload = cb; document.head.appendChild(s);
     }
 
+    // Detect Xtream VOD URLs: /movie/user/pass/id.ext (should use HLS, not mpegts)
+    const xtreamVodMatch = url.match(/^(https?:\/\/[^/]+\/)movie\/([^/]+\/[^/]+\/\d+)\.\w+$/);
+    if (xtreamVodMatch) {
+      // Rewrite VOD URL to .m3u8 — Xtream servers support HLS for VOD
+      const hlsUrl = xtreamVodMatch[1] + "movie/" + xtreamVodMatch[2] + ".m3u8";
+      if (window.Hls) startHls(hlsUrl);
+      else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
+                      () => startHls(hlsUrl));
+      return;
+    }
+
     const needTs  = url.includes("extension=ts") || /\.ts(\?|$)/.test(url)
       || (current.type === "live" && !url.includes(".m3u8"));
     const needHls = !needTs && (url.includes(".m3u8") || url.includes("/live/") || url.includes("/movie/"));
 
-    // For Xtream streams on HTTPS, prefer HLS (.m3u8) over raw TS since we can proxy HLS segments
+    // For Xtream live streams on HTTPS, prefer HLS (.m3u8) over raw TS since we can proxy HLS segments
     const xtreamBase = url.match(/^(https?:\/\/[^/]+\/)[^/]+\/[^/]+\/(\d+)$/);
     if (needTs && isMixed(url) && xtreamBase) {
       // Rewrite to .m3u8 — Xtream servers support both formats

@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3001;
 
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || "*",
-  methods: ["GET", "POST"],
+  methods: ["GET", "POST", "OPTIONS", "HEAD"],
 }));
 app.use(express.json());
 
@@ -473,7 +473,37 @@ app.get("/stalker/epg", async (req, res) => {
   }
 });
 
-// ── GET /stream?url=... — streaming proxy for live IPTV streams (pipes body, preserves IP-bound tokens)
+// ── /stream?url=... — streaming proxy for live IPTV streams (pipes body, preserves IP-bound tokens)
+// Handles GET (stream data), HEAD (check availability), and OPTIONS (CORS preflight)
+app.options("/stream", (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Range, Content-Type");
+  res.set("Access-Control-Max-Age", "86400");
+  res.status(204).end();
+});
+
+app.head("/stream", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).end();
+  try {
+    const upstream = await fetch(url, {
+      method: "HEAD",
+      headers: { "User-Agent": "StreamVault/1.0" },
+      redirect: "follow",
+    });
+    res.set("Access-Control-Allow-Origin", "*");
+    const ct = upstream.headers.get("content-type");
+    if (ct) res.set("Content-Type", ct);
+    const cl = upstream.headers.get("content-length");
+    if (cl) res.set("Content-Length", cl);
+    res.status(upstream.status).end();
+  } catch (e) {
+    console.error("Stream HEAD error:", e.message);
+    if (!res.headersSent) res.status(502).end();
+  }
+});
+
 app.get("/stream", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).json({ error: "url required" });
@@ -485,6 +515,8 @@ app.get("/stream", async (req, res) => {
     if (!upstream.ok) return res.status(upstream.status).end();
     const ct = upstream.headers.get("content-type");
     res.set("Access-Control-Allow-Origin", "*");
+    res.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "Range, Content-Type");
     if (ct) res.set("Content-Type", ct);
     upstream.body.pipe(res);
   } catch (e) {
