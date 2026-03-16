@@ -334,14 +334,18 @@ app.get("/stalker/vod", async (req, res) => {
 });
 
 // ── GET /stalker/stream
+// content_type: "live" (default) uses type=itv, "vod" uses type=vod, "series" uses type=vod
 app.get("/stalker/stream", async (req, res) => {
-  const { portal, mac, cmd } = req.query;
+  const { portal, mac, cmd, content_type } = req.query;
   if (!portal || !mac || !cmd) return res.status(400).json({ error: "portal, mac and cmd required" });
+
+  // Map content_type to the correct Stalker API type parameter
+  const stalkerType = (content_type === "vod" || content_type === "series") ? "vod" : "itv";
 
   try {
     const session = await getSession(portal, mac);
     const data = await portalFetchRetry(session, {
-      type: "itv", action: "create_link",
+      type: stalkerType, action: "create_link",
       cmd, series: 0, forced_storage: 0,
       disable_ad: 0, download: 0, force_ch_link_check: 0,
     });
@@ -399,6 +403,67 @@ app.get("/stalker/series", async (req, res) => {
     res.json({ items, total: items.length });
   } catch (e) {
     console.error("Series error:", e.message);
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// ── GET /stalker/series/episode/stream — resolve a playable URL for a series episode
+// NOTE: This static route must be registered BEFORE the parameterized :seriesId route
+app.get("/stalker/series/episode/stream", async (req, res) => {
+  const { portal, mac, cmd, episode } = req.query;
+  if (!portal || !mac || !cmd || !episode) {
+    return res.status(400).json({ error: "portal, mac, cmd and episode required" });
+  }
+
+  try {
+    const session = await getSession(portal, mac);
+    const data = await portalFetchRetry(session, {
+      type: "vod", action: "create_link",
+      cmd, series: episode, forced_storage: 0,
+      disable_ad: 0, download: 0, force_ch_link_check: 0,
+    });
+
+    const streamUrl = data?.js?.cmd;
+    if (!streamUrl) throw new Error("No stream URL returned for episode");
+
+    const cleanUrl = streamUrl.replace(/^ffmpeg\s+/, "").trim();
+    console.log(`Series episode stream resolved: ep=${episode}`);
+    res.json({ url: cleanUrl });
+  } catch (e) {
+    console.error("Series episode stream error:", e.message);
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// ── GET /stalker/series/:seriesId/seasons — returns seasons with episode lists
+app.get("/stalker/series/:seriesId/seasons", async (req, res) => {
+  const { portal, mac } = req.query;
+  const { seriesId } = req.params;
+  if (!portal || !mac) return res.status(400).json({ error: "portal and mac required" });
+  if (!seriesId)       return res.status(400).json({ error: "seriesId required" });
+
+  try {
+    const session = await getSession(portal, mac);
+    // movie_id is the numeric part of the series id (e.g. "646" from "646:646")
+    const movieId = seriesId.split(":")[0];
+    const data = await portalFetchRetry(session, {
+      type: "series", action: "get_ordered_list",
+      movie_id: movieId, page: 1, p: 1,
+    }, 20000);
+
+    const rawSeasons = data?.js?.data || [];
+    const seasons = rawSeasons.map(s => ({
+      id:       s.id,
+      name:     s.name,
+      cmd:      s.cmd || "",
+      episodes: Array.isArray(s.series) ? s.series : [],
+      logo:     s.screenshot_uri || s.cover || null,
+    }));
+
+    console.log(`Series ${seriesId} seasons: ${seasons.length} (episodes: ${seasons.map(s => s.episodes.length).join(",")})`);
+    res.json({ seasons });
+  } catch (e) {
+    console.error("Series seasons error:", e.message);
     res.status(502).json({ error: e.message });
   }
 });

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
-const PROXY = import.meta.env.VITE_PROXY_URL ?? "http://localhost:3001";
+const PROXY = import.meta.env.VITE_PROXY_URL || "http://localhost:3001";
 
 // ══════════════════════════════════════════════════════════════════
 // THEMES (OTT Navigator style multi-theme)
@@ -172,8 +172,10 @@ function makeXtreamAPI(server, user, pass) {
     getVOD: () => proxyFetch(`${base}&action=get_vod_streams`).then(r => r.json()),
     getSeriesCategories: () => proxyFetch(`${base}&action=get_series_categories`).then(r => r.json()),
     getSeries: () => proxyFetch(`${base}&action=get_series`).then(r => r.json()),
+    getSeriesInfo: (id) => proxyFetch(`${base}&action=get_series_info&series_id=${id}`).then(r => r.json()),
     liveURL: id => `${server}/live/${user}/${pass}/${id}.m3u8`,
     vodURL: (id, ext="mp4") => `${server}/movie/${user}/${pass}/${id}.${ext}`,
+    seriesStreamURL: (id, ext="mp4") => `${server}/series/${user}/${pass}/${id}.${ext}`,
   };
 }
 
@@ -481,6 +483,36 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
   width:18px;height:18px;display:flex;align-items:center;justify-content:center;font-size:.6rem;font-weight:700;color:#000}
 .disc-key-prompt{display:flex;flex-direction:column;align-items:center;justify-content:center;
   gap:1rem;flex:1;text-align:center;padding:2rem}
+
+/* SERIES DETAIL MODAL */
+.series-modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:400;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px)}
+.series-modal{background:var(--s1);border:1px solid var(--b2);border-radius:16px;width:100%;max-width:640px;max-height:85vh;
+  box-shadow:0 32px 80px #000000b0;display:flex;flex-direction:column;overflow:hidden;animation:fadeUp .2s ease}
+.series-modal-header{display:flex;align-items:flex-start;gap:1rem;padding:1.4rem 1.4rem .8rem;flex-shrink:0}
+.series-modal-poster{width:90px;aspect-ratio:2/3;object-fit:cover;border-radius:10px;background:var(--s2);flex-shrink:0}
+.series-modal-poster-ph{width:90px;aspect-ratio:2/3;background:var(--s2);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:2.2rem;flex-shrink:0}
+.series-modal-info{flex:1;min-width:0}
+.series-modal-title{font-family:'Rajdhani',sans-serif;font-size:1.4rem;font-weight:700;line-height:1.2;margin-bottom:.25rem}
+.series-modal-meta{font-size:.78rem;color:var(--t2);margin-bottom:.35rem}
+.series-modal-desc{font-size:.76rem;color:var(--t2);line-height:1.5;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.series-modal-close{background:none;border:none;color:var(--t2);font-size:1.3rem;cursor:pointer;padding:.2rem .4rem;margin-left:auto;flex-shrink:0;transition:color .15s;line-height:1}
+.series-modal-close:hover{color:var(--danger)}
+.series-modal-body{flex:1;overflow-y:auto;padding:0 1.4rem 1.4rem}
+.series-seasons-tabs{display:flex;gap:.3rem;background:var(--s2);padding:4px;border-radius:10px;margin-bottom:1rem;flex-wrap:wrap}
+.series-season-tab{padding:.4rem .75rem;background:none;border:none;border-radius:7px;color:var(--t2);
+  font-family:'DM Sans',sans-serif;font-size:.75rem;font-weight:500;cursor:pointer;transition:all .2s;white-space:nowrap}
+.series-season-tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px #00000040}
+.series-ep-list{display:flex;flex-direction:column;gap:.4rem}
+.series-ep-item{display:flex;align-items:center;gap:.75rem;padding:.6rem .8rem;background:var(--s2);border:1px solid var(--b1);
+  border-radius:9px;cursor:pointer;transition:all .15s}
+.series-ep-item:hover{border-color:var(--b2);background:var(--s3)}
+.series-ep-item.loading{opacity:.6;pointer-events:none}
+.series-ep-num{width:28px;height:28px;border-radius:50%;background:${t.accent}18;color:var(--accent);font-size:.72rem;font-weight:700;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.series-ep-name{font-size:.82rem;font-weight:500;flex:1}
+.series-ep-play{font-size:.85rem;opacity:.5;transition:opacity .15s;flex-shrink:0}
+.series-ep-item:hover .series-ep-play{opacity:1}
+.series-loading{display:flex;align-items:center;justify-content:center;gap:.65rem;padding:2rem;color:var(--t2);font-size:.85rem}
 `;
 }
 
@@ -599,6 +631,23 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
       if (window.Hls) startHls(hlsUrl);
       else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
                       () => startHls(hlsUrl));
+      return;
+    }
+
+    // Stalker VOD/series items are direct video files (MKV, MP4, etc.) served by the portal.
+    // They should NOT use mpegts.js (which is for live TS streams). Play them via the
+    // <video> element directly, or via HLS if the URL ends in .m3u8.
+    const isStalkerVod = (current.type === "vod" || current.type === "series")
+      && (url.includes("/play/movie.php") || url.includes("/play/live.php") || url.includes("play_token="));
+    if (isStalkerVod) {
+      if (url.includes(".m3u8")) {
+        if (window.Hls) startHls(url);
+        else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
+                        () => startHls(url));
+      } else {
+        // Direct video file — proxy if needed for mixed content, let <video> handle it
+        video.src = isMixed(url) ? streamProxy(url) : url; video.play().catch(()=>{});
+      }
       return;
     }
 
@@ -876,19 +925,52 @@ function Setup({ onConnect }) {
     finally { setLoading(false); }
   }
 
+  function normalizeUnicode(t) {
+    return t
+      // Mathematical Monospace A-Z (U+1D670-U+1D689) and a-z (U+1D68A-U+1D6A3)
+      .replace(/[\u{1D670}-\u{1D689}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D670 + 0x41))
+      .replace(/[\u{1D68A}-\u{1D6A3}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D68A + 0x61))
+      // Mathematical Bold A-Z (U+1D400-U+1D419) and a-z (U+1D41A-U+1D433)
+      .replace(/[\u{1D400}-\u{1D419}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D400 + 0x41))
+      .replace(/[\u{1D41A}-\u{1D433}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D41A + 0x61))
+      // Mathematical Bold Italic A-Z (U+1D468-U+1D481) and a-z (U+1D482-U+1D49B)
+      .replace(/[\u{1D468}-\u{1D481}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D468 + 0x41))
+      .replace(/[\u{1D482}-\u{1D49B}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D482 + 0x61))
+      // Mathematical Sans-Serif A-Z (U+1D5A0-U+1D5B9) and a-z (U+1D5BA-U+1D5D3)
+      .replace(/[\u{1D5A0}-\u{1D5B9}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D5A0 + 0x41))
+      .replace(/[\u{1D5BA}-\u{1D5D3}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D5BA + 0x61))
+      // Mathematical Sans-Serif Bold A-Z (U+1D5D4-U+1D5ED) and a-z (U+1D5EE-U+1D607)
+      .replace(/[\u{1D5D4}-\u{1D5ED}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D5D4 + 0x41))
+      .replace(/[\u{1D5EE}-\u{1D607}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D5EE + 0x61))
+      // Mathematical Italic A-Z (U+1D434-U+1D44D) and a-z (U+1D44E-U+1D467)
+      .replace(/[\u{1D434}-\u{1D44D}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D434 + 0x41))
+      .replace(/[\u{1D44E}-\u{1D467}]/gu, c => String.fromCharCode(c.codePointAt(0) - 0x1D44E + 0x61))
+      // Normalize arrow separators to colon
+      .replace(/[\u27A9\u279C\u2794\u2192\u25BA\u21D2\u27F9]/g, ':')
+      // Strip box-drawing characters
+      .replace(/[\u2560\u2563\u2551\u2557\u2554\u255A\u255D\u256C\u2569\u2566\u251C\u2524\u2502\u2510\u2518\u2514\u250C\u252C\u2534\u253C\u2500\u2550]/g, '')
+      // Strip enclosed alphanumerics (regional/circled letters used as decorators)
+      .replace(/[\u{1F150}-\u{1F169}\u{1F170}-\u{1F18F}\u{1F190}-\u{1F1AC}]/gu, '')
+      // Strip keycap digit sequences (e.g., 1️⃣) and decorators like ❖
+      .replace(/[\d]\uFE0F?\u20E3/gu, '')
+      .replace(/[\u2756]/g, '');
+  }
+
   function detectFromText(text) {
+    // Normalize Unicode-decorated text to plain ASCII before parsing
+    text = normalizeUnicode(text);
     const results = [];
 
-    // Detect Stalker portals + MACs + serial + deviceId by proximity in text
-    const portalPattern = /https?:\/\/[^\s"'<>]+?\/(?:stalker_portal\/)?c\/?/gi;
-    const macPattern = /([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/g;
+    // Detect Stalker portals + MACs + serial + deviceId + deviceId2 by proximity in text
+    const portalPattern = /https?:\/\/[^\s"'<>]+\/(?:stalker_portal\/)?c\/?/gi;
+    const macPattern = /([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}/g;
 
     // Split text into blocks (by double newline or portal URL) and pair within each block
     const lines = text.split("\n");
     let blocks = [], cur = [];
+    const portalTestRe = /https?:\/\/[^\s"'<>]+\/(?:stalker_portal\/)?c\/?/i;
     for (const line of lines) {
-      if (portalPattern.test(line) && cur.length > 0) { blocks.push(cur.join("\n")); cur = []; }
-      portalPattern.lastIndex = 0;
+      if (portalTestRe.test(line) && cur.length > 0) { blocks.push(cur.join("\n")); cur = []; }
       cur.push(line);
     }
     if (cur.length) blocks.push(cur.join("\n"));
@@ -897,23 +979,34 @@ function Setup({ onConnect }) {
     const usedMacs = new Set();
     for (const block of blocks) {
       const bp = block.match(portalPattern) || [];
+      portalPattern.lastIndex = 0;
       const bm = block.match(macPattern) || [];
-      // Extract serial: look for SERIAL followed by hex-ish string
-      const serialMatch = block.match(/(?:SERIAL|𝚂𝙴𝚁𝙸𝙰𝙻|𝐒𝐄𝐑𝐈𝐀𝐋)[^\w]*?(?:NUM|CUT|𝙽𝚄𝙼|𝐂𝐔𝐓)?[^A-Za-z0-9]*?([A-Fa-f0-9]{10,})/i);
+      macPattern.lastIndex = 0;
+
+      // Extract serial: look for "serial", "sn", "s/n" labels followed by value
+      const serialMatch = block.match(/(?:serial(?:\s*(?:number|num|#))?|s\/n|sn)\s*[:=\s]\s*([A-Za-z0-9_-]+)/i);
       const serial = serialMatch ? serialMatch[1] : "";
-      // Extract deviceId: look for DEVICE ID followed by hex string (64 chars)
-      const deviceMatch = block.match(/(?:DEVICE|𝙳𝙴𝚅𝙸𝙲𝙴|𝐃𝐄𝐕𝐈𝐂𝐄)[^A-Za-z0-9]*?(?:ID|𝙸𝙳|𝐈𝐃)[^A-Fa-f0-9]*?(?:1️⃣❖2️⃣)?[^A-Fa-f0-9]*?([A-Fa-f0-9]{32,})/i);
-      const deviceId = deviceMatch ? deviceMatch[1] : "";
+
+      // Extract deviceId2: look for "device id 2", "deviceid2", "device_id_2" labels (check this BEFORE deviceId)
+      const deviceId2Match = block.match(/(?:device[\s_-]*id[\s_-]*2|deviceid2|device_id_2)\s*[:=\s]\s*([A-Za-z0-9_-]+)/i);
+      let deviceId2 = deviceId2Match ? deviceId2Match[1] : "";
+
+      // Extract deviceId: look for "device id", "deviceid", "device_id" labels (excluding "device id 2" variants)
+      const deviceIdMatch = block.match(/(?:device[\s_-]*id|deviceid|device_id)(?![\s_-]*2)\s*[:=\s]\s*([A-Za-z0-9_-]+)/i);
+      const deviceId = deviceIdMatch ? deviceIdMatch[1] : "";
+
+      // If only one device ID is found, use it for both (common in decorated text where one value is shared)
+      if (deviceId && !deviceId2) deviceId2 = deviceId;
 
       if (bp.length && bm.length) {
         const portal = bp[0].replace(/\/+$/,"");
         const mac = bm[0];
         if (!usedMacs.has(mac)) {
           usedMacs.add(mac);
-          results.push({ type:"stalker", server:portal, mac, serial, deviceId, label:`Stalker · ${mac.slice(-5)}` });
+          results.push({ type:"stalker", server:portal, mac, serial, deviceId, deviceId2, label:`Stalker · ${mac.slice(-5)}` });
         }
       } else if (bm.length) {
-        bm.forEach(mac => { if (!usedMacs.has(mac)) { usedMacs.add(mac); results.push({ type:"stalker", server:"", mac, serial, deviceId, label:`MAC · ${mac}` }); } });
+        bm.forEach(mac => { if (!usedMacs.has(mac)) { usedMacs.add(mac); results.push({ type:"stalker", server:"", mac, serial, deviceId, deviceId2, label:`MAC · ${mac}` }); } });
       }
     }
 
@@ -1038,7 +1131,7 @@ function Setup({ onConnect }) {
                   <div key={i} style={{display:"flex",alignItems:"center",gap:".5rem",padding:".45rem .65rem",
                     background:"var(--s2)",border:"1px solid var(--b2)",borderRadius:"8px",cursor:"pointer",transition:"all .2s"}}
                     onClick={() => {
-                      if (d.type==="stalker") { setType("stalker"); set("server",d.server); set("mac",d.mac); if(d.serial){set("serial",d.serial);setShowAdvanced(true);} if(d.deviceId){set("deviceId",d.deviceId);set("deviceId2",d.deviceId);setShowAdvanced(true);} }
+                      if (d.type==="stalker") { setType("stalker"); set("server",d.server); set("mac",d.mac); if(d.serial){set("serial",d.serial);setShowAdvanced(true);} if(d.deviceId){set("deviceId",d.deviceId);setShowAdvanced(true);} if(d.deviceId2){set("deviceId2",d.deviceId2);setShowAdvanced(true);} else if(d.deviceId){set("deviceId2",d.deviceId);} }
                       else if (d.type==="xtream") { setType("xtream"); set("server",d.server); set("user",d.user); set("pass",d.pass); }
                       else if (d.type==="m3u") { setType("m3u"); set("url",d.url); }
                     }}
@@ -1126,6 +1219,11 @@ export default function App() {
   const [vod, setVod]         = useState([]);
   const [series, setSeries]   = useState([]);
   const [loading, setLoading] = useState(false);
+
+  // ── series detail modal
+  const [seriesDetail, setSeriesDetail] = useState(null); // {item, seasons, activeSeason}
+  const [seriesLoading, setSeriesLoading] = useState(false);
+  const [episodeLoading, setEpisodeLoading] = useState(null); // episode number being loaded
 
   // ── ui state
   const [section, setSection] = useState("live");
@@ -1398,7 +1496,8 @@ export default function App() {
 
   async function resolveStalkerStream(item) {
     try {
-      const res = await fetch(`${PROXY}/stalker/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(item._stalkerCmd)}`);
+      const contentType = item.type || "live";
+      const res = await fetch(`${PROXY}/stalker/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(item._stalkerCmd)}&content_type=${encodeURIComponent(contentType)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       return data.url;
@@ -1467,6 +1566,11 @@ export default function App() {
   }
 
   async function playItem(item) {
+    // If this is a series item, open the detail modal instead of playing
+    if (item.type === "series") {
+      openSeriesDetail(item);
+      return;
+    }
     if (conn?.type === "stalker" && item._stalkerCmd && !item.url) {
       const resolved = await resolveStalkerStream(item);
       if (!resolved) return;
@@ -1476,6 +1580,85 @@ export default function App() {
     } else {
       setPlaying(item);
       addHistory(item);
+    }
+  }
+
+  // ── series detail (seasons/episodes)
+  async function openSeriesDetail(item) {
+    if (!item || item.type !== "series") return;
+    setSeriesLoading(true);
+    setSeriesDetail({ item, seasons: [], activeSeason: 0 });
+
+    try {
+      if (conn?.type === "stalker") {
+        const res = await fetch(`${PROXY}/stalker/series/${encodeURIComponent(item.id)}/seasons?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        const seasons = data.seasons || [];
+        setSeriesDetail({ item, seasons, activeSeason: 0 });
+      } else if (conn?.type === "xtream") {
+        const api = makeXtreamAPI(conn.server, conn.user, conn.pass);
+        const info = await api.getSeriesInfo(item.id);
+        const seasonNums = Object.keys(info.episodes || {}).sort((a,b) => Number(a) - Number(b));
+        const seasons = seasonNums.map(sn => ({
+          id: `${item.id}:${sn}`,
+          name: `Season ${sn}`,
+          episodes: (info.episodes[sn] || []).map(ep => ({
+            num: ep.episode_num,
+            title: ep.title || `Episode ${ep.episode_num}`,
+            id: ep.id,
+            ext: ep.container_extension || "mp4",
+          })),
+        }));
+        setSeriesDetail({ item, seasons, activeSeason: 0, xtreamInfo: info });
+      }
+    } catch(e) {
+      console.error("Series detail error:", e);
+      setSeriesDetail(null);
+    } finally {
+      setSeriesLoading(false);
+    }
+  }
+
+  async function playSeriesEpisode(season, episodeNum) {
+    if (!seriesDetail) return;
+    setEpisodeLoading(episodeNum);
+    try {
+      if (conn?.type === "stalker") {
+        const res = await fetch(`${PROXY}/stalker/series/episode/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(season.cmd)}&episode=${episodeNum}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        if (!data.url) throw new Error("No stream URL returned");
+        const epItem = {
+          id: `${seriesDetail.item.id}-s${seriesDetail.activeSeason}-e${episodeNum}`,
+          name: `${seriesDetail.item.name} - ${season.name} E${episodeNum}`,
+          url: data.url,
+          logo: seriesDetail.item.logo,
+          type: "vod",
+          group: seriesDetail.item.group,
+        };
+        setPlaying(epItem);
+        addHistory(epItem);
+      } else if (conn?.type === "xtream") {
+        const ep = season.episodes?.find(e => e.num == episodeNum || e.id == episodeNum);
+        if (!ep) return;
+        const api = makeXtreamAPI(conn.server, conn.user, conn.pass);
+        const streamUrl = api.seriesStreamURL(ep.id, ep.ext || "mp4");
+        const epItem = {
+          id: `${seriesDetail.item.id}-e${ep.id}`,
+          name: `${seriesDetail.item.name} - ${season.name} ${ep.title || `E${ep.num}`}`,
+          url: streamUrl,
+          logo: seriesDetail.item.logo,
+          type: "vod",
+          group: seriesDetail.item.group,
+        };
+        setPlaying(epItem);
+        addHistory(epItem);
+      }
+    } catch(e) {
+      console.error("Episode play error:", e);
+    } finally {
+      setEpisodeLoading(null);
     }
   }
 
@@ -1785,7 +1968,7 @@ export default function App() {
                       const hist = history.find(h=>(h.id||h.url)===(item.id||item.url));
                       const pct = hist?.position && hist?.duration ? Math.min(100, (hist.position/hist.duration)*100) : 0;
                       return (
-                        <div key={item.id||i} className="vod-card" onClick={() => item.type!=="series" && playItem(item)} title={item.name}>
+                        <div key={item.id||i} className="vod-card" onClick={() => playItem(item)} title={item.name}>
                           {item.logo
                             ? <img className="vod-poster" src={item.logo} alt="" onError={e=>e.target.style.display="none"} />
                             : <div className="vod-ph">{section==="series"?"📽":"🎬"}</div>}
@@ -1841,6 +2024,85 @@ export default function App() {
           </div>
           <div className="ctx-item" onClick={() => {setCat(ctx.catName);setCtx(null);}}>
             📌 Filter to this
+          </div>
+        </div>
+      )}
+
+      {/* ── SERIES DETAIL MODAL ── */}
+      {seriesDetail && (
+        <div className="series-modal-ov" onClick={() => { if (!seriesLoading) setSeriesDetail(null); }}>
+          <div className="series-modal" onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div className="series-modal-header">
+              {seriesDetail.item.logo
+                ? <img className="series-modal-poster" src={seriesDetail.item.logo} alt="" onError={e => e.target.style.display="none"} />
+                : <div className="series-modal-poster-ph">📽</div>}
+              <div className="series-modal-info">
+                <div className="series-modal-title">{seriesDetail.item.name}</div>
+                <div className="series-modal-meta">
+                  {[seriesDetail.item.year, seriesDetail.item.rating && `★${parseFloat(seriesDetail.item.rating||0).toFixed(1)}`].filter(Boolean).join(" · ")}
+                  {seriesDetail.seasons.length > 0 && ` · ${seriesDetail.seasons.length} Season${seriesDetail.seasons.length > 1 ? "s" : ""}`}
+                </div>
+                {seriesDetail.item.description && (
+                  <div className="series-modal-desc">{seriesDetail.item.description}</div>
+                )}
+              </div>
+              <button className="series-modal-close" onClick={() => setSeriesDetail(null)} title="Close">✕</button>
+            </div>
+            {/* Body */}
+            <div className="series-modal-body">
+              {seriesLoading ? (
+                <div className="series-loading">
+                  <div className="spinner" />
+                  <span>Loading seasons…</span>
+                </div>
+              ) : seriesDetail.seasons.length === 0 ? (
+                <div style={{textAlign:"center",padding:"2rem",color:"var(--t2)",fontSize:".85rem"}}>
+                  No seasons found for this series.
+                </div>
+              ) : (
+                <>
+                  {/* Season tabs */}
+                  {seriesDetail.seasons.length > 1 && (
+                    <div className="series-seasons-tabs">
+                      {seriesDetail.seasons.map((s, idx) => (
+                        <button key={s.id || idx}
+                          className={`series-season-tab ${seriesDetail.activeSeason === idx ? "on" : ""}`}
+                          onClick={() => setSeriesDetail(prev => ({ ...prev, activeSeason: idx }))}>
+                          {s.name || `Season ${idx + 1}`}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {seriesDetail.seasons.length === 1 && (
+                    <div style={{fontSize:".8rem",fontWeight:600,color:"var(--t2)",marginBottom:".7rem"}}>
+                      {seriesDetail.seasons[0].name || "Season 1"} — {seriesDetail.seasons[0].episodes.length} episode{seriesDetail.seasons[0].episodes.length !== 1 ? "s" : ""}
+                    </div>
+                  )}
+                  {/* Episode list */}
+                  <div className="series-ep-list">
+                    {(() => {
+                      const season = seriesDetail.seasons[seriesDetail.activeSeason];
+                      if (!season) return null;
+                      const episodes = conn?.type === "xtream"
+                        ? season.episodes.map(ep => ({ num: ep.num || ep.id, label: ep.title || `Episode ${ep.num}` }))
+                        : season.episodes.map(ep => ({ num: ep, label: `Episode ${ep}` }));
+                      return episodes.map(ep => (
+                        <div key={ep.num}
+                          className={`series-ep-item ${episodeLoading === ep.num ? "loading" : ""}`}
+                          onClick={() => playSeriesEpisode(season, ep.num)}>
+                          <div className="series-ep-num">{ep.num}</div>
+                          <div className="series-ep-name">{ep.label}</div>
+                          {episodeLoading === ep.num
+                            ? <div className="spinner" style={{width:16,height:16,borderWidth:2}} />
+                            : <span className="series-ep-play">▶</span>}
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
