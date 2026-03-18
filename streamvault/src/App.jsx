@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 const PROXY = import.meta.env.VITE_PROXY_URL || "http://localhost:3001";
+const STREAM_PROXY = import.meta.env.VITE_STREAM_PROXY_URL || PROXY;
 
 // ══════════════════════════════════════════════════════════════════
 // THEMES (OTT Navigator style multi-theme)
@@ -547,11 +548,8 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
   const [streamErr, setStreamErr] = useState(null);
 
   const isMixed = location.protocol === "https:" ? (u) => u?.startsWith("http://") : () => false;
-  // Stalker/Xtream streams have IP-bound tokens — must proxy through local proxy (same IP that got the token)
-  // Other streams use Cloudflare Worker /stream proxy
-  const streamProxy = (u) => connType === "stalker" || connType === "xtream"
-    ? `${PROXY}/stream?url=${encodeURIComponent(u)}`
-    : `/stream?url=${encodeURIComponent(u)}`;
+  // Proxy streams through STREAM_PROXY (may differ from API proxy) — skip if already proxied
+  const streamProxy = (u) => (u?.startsWith(PROXY) || u?.startsWith(STREAM_PROXY)) ? u : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
 
   function initPlayer(url) {
     const video = videoRef.current;
@@ -1494,13 +1492,32 @@ export default function App() {
     setPrefetchProgress(null);
   }
 
+  // Build /stalker/play URL — resolves token + streams in one CF Worker request (same IP)
+  function stalkerPlayUrl(cmd, contentType = "live", episode = null) {
+    let url = `${PROXY}/stalker/play?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(cmd)}&content_type=${encodeURIComponent(contentType)}`;
+    if (episode) url += `&episode=${episode}`;
+    return url;
+  }
+
   async function resolveStalkerStream(item) {
     try {
       const contentType = item.type || "live";
-      const res = await fetch(`${PROXY}/stalker/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(item._stalkerCmd)}&content_type=${encodeURIComponent(contentType)}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      return data.url;
+      const playUrl = stalkerPlayUrl(item._stalkerCmd, contentType);
+      // Try /stalker/play — if Worker can stream directly, use the play URL
+      // If it returns JSON with fallback:true, the Worker couldn't stream (CF-to-CF block etc)
+      // In that case, use the resolved URL through /stream proxy
+      const res = await fetch(playUrl);
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("json")) {
+        const data = await res.json();
+        if (data.url) {
+          const u = data.url;
+          return (u.startsWith(PROXY) || u.startsWith(STREAM_PROXY)) ? u : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
+        }
+        if (data.error) throw new Error(data.error);
+      }
+      // Worker streamed successfully — use the play URL directly
+      return playUrl;
     } catch(e) { console.error("Stream resolve error:", e); return null; }
   }
 
@@ -1591,7 +1608,7 @@ export default function App() {
 
     try {
       if (conn?.type === "stalker") {
-        const res = await fetch(`${PROXY}/stalker/series/${encodeURIComponent(item.id)}/seasons?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+        const res = await fetch(`${PROXY}/stalker/series/seasons?seriesId=${encodeURIComponent(item.id)}&portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const seasons = data.seasons || [];
@@ -1625,14 +1642,19 @@ export default function App() {
     setEpisodeLoading(episodeNum);
     try {
       if (conn?.type === "stalker") {
-        const res = await fetch(`${PROXY}/stalker/series/episode/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(season.cmd)}&episode=${episodeNum}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        if (!data.url) throw new Error("No stream URL returned");
+        // Resolve via /stalker/play — handles both direct streaming and fallback
+        const playUrl = stalkerPlayUrl(season.cmd, "series", episodeNum);
+        const res = await fetch(playUrl);
+        const ct = res.headers.get("content-type") || "";
+        let resolvedUrl = playUrl;
+        if (ct.includes("json")) {
+          const data = await res.json();
+          if (data.url) resolvedUrl = (data.url.startsWith(PROXY) || data.url.startsWith(STREAM_PROXY)) ? data.url : `${STREAM_PROXY}/stream?url=${encodeURIComponent(data.url)}`;
+        }
         const epItem = {
           id: `${seriesDetail.item.id}-s${seriesDetail.activeSeason}-e${episodeNum}`,
           name: `${seriesDetail.item.name} - ${season.name} E${episodeNum}`,
-          url: data.url,
+          url: resolvedUrl,
           logo: seriesDetail.item.logo,
           type: "vod",
           group: seriesDetail.item.group,

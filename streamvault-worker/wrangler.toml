@@ -1,0 +1,8 @@
+name = "streamvault-worker"
+main = "src/index.js"
+compatibility_date = "2024-12-01"
+
+# KV namespace for Stalker session/path caching
+[[kv_namespaces]]
+binding = "SV_CACHE"
+id = "852bb8a28504423e867886eac35fde3e"
