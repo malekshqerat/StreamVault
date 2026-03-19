@@ -11,6 +11,8 @@ const THEMES = {
   Navy:   { bg:"#030b1a", s1:"#061228", s2:"#0d1f3c", s3:"#152850", accent:"#4da6ff", accent2:"#6c63ff", t1:"#d0e8ff", t2:"#6090b8", t3:"#304560" },
   AMOLED: { bg:"#000000", s1:"#0d0d0d", s2:"#181818", s3:"#222222", accent:"#ff6b35", accent2:"#ff2d55", t1:"#f0f0f0", t2:"#888888", t3:"#444444" },
   Forest: { bg:"#050f0a", s1:"#0a1f14", s2:"#112a1c", s3:"#1a3828", accent:"#00e896", accent2:"#00b4d8", t1:"#d0ffe8", t2:"#5a9070", t3:"#2a5038" },
+  White:  { bg:"#ffffff", s1:"#f5f5f7", s2:"#ebebef", s3:"#dddde3", accent:"#0066ff", accent2:"#7c3aed", t1:"#1a1a2e", t2:"#5a5a72", t3:"#9a9ab0" },
+  Bright: { bg:"#f8f9fc", s1:"#eef0f6", s2:"#e2e5ee", s3:"#d5d8e3", accent:"#e8364f", accent2:"#ff8c00", t1:"#1c1c28", t2:"#555568", t3:"#8888a0" },
 };
 const THEME_NAMES = Object.keys(THEMES);
 const PROFILE_COLORS = ["#00d4ff","#ff6b35","#00e896","#ff2d55","#a78bfa","#fbbf24"];
@@ -273,12 +275,15 @@ function uid() { return Math.random().toString(36).slice(2,10); }
 // CSS GENERATOR
 // ══════════════════════════════════════════════════════════════════
 function genCSS(t) {
+  const isLight = t.bg === "#ffffff" || t.bg === "#f8f9fc";
+  const b1 = isLight ? "rgba(0,0,0,0.07)" : "rgba(255,255,255,0.06)";
+  const b2 = isLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.11)";
   return `
 @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:${t.bg};--s1:${t.s1};--s2:${t.s2};--s3:${t.s3};
-  --b1:rgba(255,255,255,0.06);--b2:rgba(255,255,255,0.11);
+  --b1:${b1};--b2:${b2};
   --accent:${t.accent};--accent2:${t.accent2};
   --glow:${t.accent}28;
   --t1:${t.t1};--t2:${t.t2};--t3:${t.t3};
@@ -331,7 +336,6 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .nav-badge{margin-left:auto;background:var(--accent2);color:#fff;font-size:.58rem;font-weight:700;
   padding:.1rem .35rem;border-radius:10px}
 .s-bottom{margin-top:auto;padding:.85rem 1rem 0;border-top:1px solid var(--b1);display:flex;flex-direction:column;gap:.4rem}
-.s-conn{font-size:.68rem;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .s-row{display:flex;gap:.4rem}
 .btn-sm{flex:1;padding:.38rem .5rem;background:var(--b1);border:1px solid var(--b2);border-radius:6px;
   color:var(--t2);font-family:'DM Sans',sans-serif;font-size:.7rem;cursor:pointer;transition:all .2s;text-align:center}
@@ -2243,12 +2247,6 @@ export default function App() {
         ))}
 
         <div className="s-bottom">
-          <div className="s-conn">
-            {conn.type==="xtream" && `${conn.user} · Xtream`}
-            {conn.type==="m3u" && `M3U · ${channels.length} channels`}
-            {conn.type==="stalker" && conn.mac}
-            {conn.type==="hls" && "Direct HLS"}
-          </div>
           <div className="s-row">
             <button className="btn-sm danger" onClick={disconnect}>⏏ Disconnect</button>
           </div>
