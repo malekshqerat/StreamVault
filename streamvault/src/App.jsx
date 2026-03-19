@@ -42,7 +42,7 @@ function scheduleCloudSync() {
         const fk = `sv-favs-${c.id}`; const v = localStorage.getItem(fk); if (v !== null) data[fk] = JSON.parse(v);
         const hk = `sv-history-${c.id}`; const hv = localStorage.getItem(hk); if (hv !== null) data[hk] = JSON.parse(hv);
       }
-      await fetch("/api/session", { method: "POST", headers: {"Content-Type":"application/json"},
+      await fetch(`${CATALOG_API}/api/session`, { method: "POST", headers: {"Content-Type":"application/json"},
         body: JSON.stringify({ guestId: GUEST_ID, data }) }).catch(() => {});
     } catch {}
   }, 5000);
@@ -177,7 +177,7 @@ migrateOldCache();
 (async () => {
   try {
     if (localStorage.getItem("sv-theme") || localStorage.getItem("sv-cloud-restored")) return;
-    const res = await fetch(`/api/session?id=${GUEST_ID}`);
+    const res = await fetch(`${CATALOG_API}/api/session?id=${GUEST_ID}`);
     const { data } = await res.json();
     if (!data || !Object.keys(data).length) return;
     for (const [k, v] of Object.entries(data)) { localStorage.setItem(k, JSON.stringify(v)); }
