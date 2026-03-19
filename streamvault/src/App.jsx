@@ -1802,7 +1802,7 @@ export default function App() {
         const data = await res.json();
         if (data.url) {
           const u = data.url;
-          return (u.startsWith(PROXY) || u.startsWith(STREAM_PROXY)) ? u : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
+          return (u.startsWith(PROXY) || u.startsWith(STREAM_PROXY) || u.startsWith(CATALOG_API)) ? u : `${CATALOG_API}/stream?url=${encodeURIComponent(u)}`;
         }
         if (data.error) throw new Error(data.error);
       }
@@ -1945,7 +1945,7 @@ export default function App() {
         let resolvedUrl = playUrl;
         if (ct.includes("json")) {
           const data = await res.json();
-          if (data.url) resolvedUrl = (data.url.startsWith(PROXY) || data.url.startsWith(STREAM_PROXY)) ? data.url : `${STREAM_PROXY}/stream?url=${encodeURIComponent(data.url)}`;
+          if (data.url) resolvedUrl = (data.url.startsWith(PROXY) || data.url.startsWith(STREAM_PROXY) || data.url.startsWith(CATALOG_API)) ? data.url : `${CATALOG_API}/stream?url=${encodeURIComponent(data.url)}`;
         }
         const epItem = {
           id: `${seriesDetail.item.id}-s${seriesDetail.activeSeason}-e${episodeNum}`,
