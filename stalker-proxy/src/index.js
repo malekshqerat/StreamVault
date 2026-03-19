@@ -588,7 +588,8 @@ app.get("/stream", async (req, res) => {
     if (ct.includes("mpegurl") || ct.includes("m3u") || url.endsWith(".m3u8")) {
       const text = await upstream.text();
       const origin = new URL(url).origin;
-      const selfBase = `${req.protocol}://${req.get("host")}`;
+      const proto = req.get("x-forwarded-proto") || req.protocol;
+      const selfBase = `${proto}://${req.get("host")}`;
       const rewritten = text.replace(/^(\/[^\s]+\.ts[^\s]*)$/gm, (match) => {
         return `${selfBase}/stream?url=${encodeURIComponent(origin + match)}`;
       }).replace(/^(\/[^\s]+\.m3u8[^\s]*)$/gm, (match) => {
