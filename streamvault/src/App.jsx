@@ -727,14 +727,13 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
       || (current.type === "live" && !url.includes(".m3u8"));
     const needHls = !needTs && (url.includes(".m3u8") || url.includes("/live/") || url.includes("/movie/"));
 
-    // For Xtream live streams on HTTPS, prefer HLS (.m3u8) over raw TS since we can proxy HLS segments
-    const xtreamBase = url.match(/^(https?:\/\/[^/]+\/)[^/]+\/[^/]+\/(\d+)$/);
-    if (needTs && isMixed(url) && xtreamBase) {
-      // Rewrite to .m3u8 — Xtream servers support both formats
-      const hlsUrl = xtreamBase[1] + url.split("/").slice(3).join("/") + ".m3u8";
-      if (window.Hls) startHls(hlsUrl);
-      else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
-                      () => startHls(hlsUrl));
+    // For Xtream live streams on HTTPS, proxy raw TS through stream proxy
+    // (HLS .m3u8 has IP-bound segment tokens that break with proxied manifests)
+    if (needTs && isMixed(url)) {
+      const proxied = streamProxy(url);
+      if (window.mpegts) startMpegts(proxied);
+      else loadScript("https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js",
+                      () => startMpegts(proxied));
       return;
     }
 
