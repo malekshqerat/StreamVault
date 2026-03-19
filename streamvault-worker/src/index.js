@@ -10,6 +10,7 @@ import {
 import { handleStream, handleStreamHead } from "./handlers/stream.js";
 import { handleProxy } from "./handlers/proxy.js";
 import { handleCleanup } from "./handlers/cleanup.js";
+import { handleAnalytics, handleDashboardHTML } from "./handlers/analytics.js";
 import {
   handlePutContent, handleGetContent, handleDeleteContent,
   handlePutConnection, handleGetConnections, handleDeleteConnection,
@@ -125,6 +126,14 @@ export default {
     if (pathname === "/api/cleanup" && method === "POST") {
       const result = await handleCleanup(env);
       return jsonResponse(result);
+    }
+
+    // Analytics
+    if (pathname === "/api/analytics" && method === "GET") {
+      return handleAnalytics(request, env, url);
+    }
+    if (pathname === "/analytics" && method === "GET") {
+      return handleDashboardHTML();
     }
 
     // 404
