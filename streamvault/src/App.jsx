@@ -2871,7 +2871,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
 
   const hero = trending[0];
 
-  const TMDBCard = useCallback(({ item }) => {
+  function renderTMDBCard(item, i) {
     const matches = findAllInLibrary(item);
     const inLib   = matches.length > 0;
     const poster  = item.poster_path ? `${TMDB_IMG}w185${item.poster_path}` : null;
@@ -2879,7 +2879,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
     const rating  = item.vote_average ? item.vote_average.toFixed(1) : null;
     const title   = item.title || item.name || "Unknown";
     return (
-      <div className="disc-card" onClick={() => handleCardClick(item)} title={title}>
+      <div key={item.id || i} className="disc-card" onClick={() => handleCardClick(item)} title={title}>
         {poster
           ? <img className="disc-poster" src={poster} alt={title} />
           : <div className="disc-poster-ph">{item.media_type === "tv" ? "📺" : "🎬"}</div>}
@@ -2891,7 +2891,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
         <div className="disc-card-meta">{[year, item.media_type === "tv" ? "TV" : "Film"].filter(Boolean).join(" · ")}</div>
       </div>
     );
-  }, [findAllInLibrary, handleCardClick]);
+  }
 
   return (
     <div className="discover-body">
@@ -2926,7 +2926,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
       <div className="disc-section">
         <div className="section-label">Trending This Week</div>
         <div className="disc-row">
-          {trending.map((item, i) => <TMDBCard key={item.id || i} item={item} />)}
+          {trending.map((item, i) => renderTMDBCard(item, i))}
         </div>
       </div>
 
@@ -2934,7 +2934,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
       <div className="disc-section">
         <div className="section-label">Popular Movies</div>
         <div className="disc-row">
-          {popularMovies.map((item, i) => <TMDBCard key={item.id || i} item={{...item, media_type:"movie"}} />)}
+          {popularMovies.map((item, i) => renderTMDBCard({...item, media_type:"movie"}, i))}
         </div>
       </div>
 
@@ -2942,7 +2942,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
       <div className="disc-section">
         <div className="section-label">Popular TV Shows</div>
         <div className="disc-row">
-          {popularTV.map((item, i) => <TMDBCard key={item.id || i} item={{...item, media_type:"tv"}} />)}
+          {popularTV.map((item, i) => renderTMDBCard({...item, media_type:"tv"}, i))}
         </div>
       </div>
 
