@@ -175,12 +175,13 @@ migrateOldCache();
 // On first load, try to restore from cloud if localStorage is empty
 (async () => {
   try {
-    if (localStorage.getItem("sv-theme")) return; // already have local data
+    if (localStorage.getItem("sv-theme") || localStorage.getItem("sv-cloud-restored")) return;
     const res = await fetch(`/api/session?id=${GUEST_ID}`);
     const { data } = await res.json();
-    if (!data) return;
+    if (!data || !Object.keys(data).length) return;
     for (const [k, v] of Object.entries(data)) { localStorage.setItem(k, JSON.stringify(v)); }
-    window.location.reload(); // reload to pick up restored data
+    localStorage.setItem("sv-cloud-restored", "1");
+    window.location.reload();
   } catch {}
 })();
 
@@ -271,6 +272,14 @@ function makeXtreamAPI(server, user, pass) {
 
 function uid() { return Math.random().toString(36).slice(2,10); }
 
+// Transform stalker item URL: extract direct HTTP URLs, store original as _stalkerCmd
+function transformStalkerItem(item) {
+  if (item._stalkerCmd !== undefined) return item;
+  const raw = (item.url || "").replace(/^ffmpeg\s+/, "").trim();
+  const isDirect = raw.startsWith("http") && !raw.includes("localhost");
+  return { ...item, _stalkerCmd: item.url, url: isDirect ? raw : null };
+}
+
 // ══════════════════════════════════════════════════════════════════
 // CSS GENERATOR
 // ══════════════════════════════════════════════════════════════════
@@ -288,6 +297,8 @@ function genCSS(t) {
   --glow:${t.accent}28;
   --t1:${t.t1};--t2:${t.t2};--t3:${t.t3};
   --danger:#ff4466;--ok:#00cc88;
+  --shadow:${isLight ? "rgba(0,0,0,0.08)" : "rgba(0,0,0,0.5)"};
+  --hover-bg:${isLight ? "rgba(0,0,0,0.04)" : "rgba(255,255,255,0.03)"};
 }
 body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overflow:hidden}
 .app{display:flex;height:100vh;overflow:hidden;background:var(--bg)}
@@ -297,7 +308,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
   background:radial-gradient(ellipse at 20% 70%,${t.accent2}22 0%,transparent 55%),
              radial-gradient(ellipse at 80% 20%,${t.accent}18 0%,transparent 50%),var(--bg);padding:2rem}
 .card{background:var(--s1);border:1px solid var(--b2);border-radius:18px;padding:2.5rem;
-  width:100%;max-width:500px;box-shadow:0 48px 96px #00000080}
+  width:100%;max-width:500px;box-shadow:0 48px 96px var(--shadow)}
 .logo{font-family:'Rajdhani',sans-serif;font-size:2.2rem;font-weight:700;letter-spacing:.12em;
   background:linear-gradient(135deg,${t.accent},${t.accent2});-webkit-background-clip:text;
   -webkit-text-fill-color:transparent;background-clip:text;margin-bottom:.2rem}
@@ -305,7 +316,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .tabs{display:flex;gap:.3rem;background:var(--s2);padding:4px;border-radius:10px;margin-bottom:1.5rem}
 .tab{flex:1;padding:.42rem .2rem;background:none;border:none;border-radius:7px;color:var(--t2);
   font-family:'DM Sans',sans-serif;font-size:.7rem;font-weight:500;cursor:pointer;transition:all .2s;text-align:center;white-space:nowrap}
-.tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px #00000040}
+.tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px var(--shadow)}
 .fg{margin-bottom:1rem}
 .fl{display:block;font-size:.7rem;font-weight:600;color:var(--t2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem}
 .fi{width:100%;background:var(--s2);border:1px solid var(--b2);border-radius:8px;
@@ -330,7 +341,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .nav{display:flex;align-items:center;gap:.55rem;padding:.5rem 1rem;color:var(--t2);
   font-size:.82rem;font-weight:500;cursor:pointer;transition:all .15s;border-left:2px solid transparent;
   position:relative}
-.nav:hover{color:var(--t1);background:rgba(255,255,255,0.03)}
+.nav:hover{color:var(--t1);background:var(--hover-bg)}
 .nav.on{color:var(--accent);background:${t.accent}12;border-left-color:var(--accent)}
 .nav-icon{font-size:.9rem;width:17px;text-align:center;flex-shrink:0}
 .nav-badge{margin-left:auto;background:var(--accent2);color:#fff;font-size:.58rem;font-weight:700;
@@ -383,7 +394,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .ch-grid{flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:.6rem;align-content:start}
 .ch-card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;padding:.8rem .7rem;
   cursor:pointer;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:.5rem;text-align:center;position:relative}
-.ch-card:hover{border-color:var(--b2);background:var(--s2);transform:translateY(-2px);box-shadow:0 8px 24px #00000040}
+.ch-card:hover{border-color:var(--b2);background:var(--s2);transform:translateY(-2px);box-shadow:0 8px 24px var(--shadow)}
 .ch-card.playing{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 8px 24px var(--glow)}
 .ch-logo{width:42px;height:42px;object-fit:contain;border-radius:6px;background:var(--s2)}
 .ch-logo-ph{width:42px;height:42px;background:var(--s3);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:1.1rem}
@@ -400,7 +411,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .vod-grid{flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:.75rem;align-content:start}
 .vod-card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;overflow:hidden;cursor:pointer;
   transition:all .2s;position:relative}
-.vod-card:hover{border-color:var(--b2);transform:translateY(-2px);box-shadow:0 14px 32px #00000050}
+.vod-card:hover{border-color:var(--b2);transform:translateY(-2px);box-shadow:0 14px 32px var(--shadow)}
 .vod-poster{width:100%;aspect-ratio:2/3;object-fit:cover;background:var(--s2);display:block}
 .vod-ph{width:100%;aspect-ratio:2/3;background:var(--s2);display:flex;align-items:center;justify-content:center;font-size:2rem}
 .vod-info{padding:.55rem .65rem}
@@ -503,13 +514,13 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 /* DIRECT HLS */
 .hls-body{padding:1.4rem;display:flex;flex-direction:column;gap:1rem;flex:1}
 .hls-row{display:flex;gap:.65rem}
-.btn-go{padding:.62rem 1.1rem;background:var(--accent);border:none;border-radius:8px;color:#000;
+.btn-go{padding:.62rem 1.1rem;background:var(--accent);border:none;border-radius:8px;color:#fff;
   font-family:'Rajdhani',sans-serif;font-weight:700;font-size:.95rem;cursor:pointer;transition:opacity .2s;white-space:nowrap}
 .btn-go:hover{opacity:.82}
 
 /* CONTEXT MENU */
 .ctx-menu{position:fixed;background:var(--s2);border:1px solid var(--b2);border-radius:9px;
-  padding:.35rem;z-index:500;box-shadow:0 12px 32px #00000060;min-width:140px;animation:fadeIn .12s ease}
+  padding:.35rem;z-index:500;box-shadow:0 12px 32px var(--shadow);min-width:140px;animation:fadeIn .12s ease}
 .ctx-item{padding:.42rem .75rem;font-size:.78rem;color:var(--t1);cursor:pointer;border-radius:6px;transition:all .15s;display:flex;align-items:center;gap:.5rem}
 .ctx-item:hover{background:var(--b2)}
 .ctx-item.red{color:var(--danger)}
@@ -535,13 +546,13 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 
 /* MODAL */
 .modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:400;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)}
-.modal{background:var(--s1);border:1px solid var(--b2);border-radius:14px;padding:1.5rem;width:100%;max-width:360px;box-shadow:0 24px 60px #000000a0}
+.modal{background:var(--s1);border:1px solid var(--b2);border-radius:14px;padding:1.5rem;width:100%;max-width:360px;box-shadow:0 24px 60px var(--shadow)}
 .modal-title{font-family:'Rajdhani',sans-serif;font-size:1.2rem;font-weight:700;margin-bottom:1.2rem}
 .modal-btns{display:flex;gap:.5rem;justify-content:flex-end}
 .btn-cancel{padding:.45rem .9rem;background:var(--s2);border:1px solid var(--b2);border-radius:7px;
   color:var(--t2);font-family:'DM Sans',sans-serif;font-size:.8rem;cursor:pointer}
 .btn-confirm{padding:.45rem .9rem;background:var(--accent);border:none;border-radius:7px;
-  color:#000;font-family:'Rajdhani',sans-serif;font-size:.88rem;font-weight:700;cursor:pointer}
+  color:#fff;font-family:'Rajdhani',sans-serif;font-size:.88rem;font-weight:700;cursor:pointer}
 
 /* DISCOVER */
 .discover-body{flex:1;overflow-y:auto;padding:1.2rem 1.4rem}
@@ -592,7 +603,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .series-seasons-tabs{display:flex;gap:.3rem;background:var(--s2);padding:4px;border-radius:10px;margin-bottom:1rem;flex-wrap:wrap}
 .series-season-tab{padding:.4rem .75rem;background:none;border:none;border-radius:7px;color:var(--t2);
   font-family:'DM Sans',sans-serif;font-size:.75rem;font-weight:500;cursor:pointer;transition:all .2s;white-space:nowrap}
-.series-season-tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px #00000040}
+.series-season-tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px var(--shadow)}
 .series-ep-list{display:flex;flex-direction:column;gap:.4rem}
 .series-ep-item{display:flex;align-items:center;gap:.75rem;padding:.6rem .8rem;background:var(--s2);border:1px solid var(--b1);
   border-radius:9px;cursor:pointer;transition:all .15s}
@@ -617,7 +628,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
   const osdTimer   = useRef(null);
   const [osd, setOsd]         = useState(true);
   const [showQCH, setShowQCH] = useState(false);
-  const [qchTimer, setQchTimer] = useState(null);
+  const qchTimer = useRef(null);
   const [chIdx, setChIdx]     = useState(() => {
     if (!channelList) return -1;
     return channelList.findIndex(c => c.id === item.id || c.url === item.url);
@@ -773,6 +784,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     return () => {
       destroyPlayers();
       clearTimeout(osdTimer.current);
+      clearTimeout(qchTimer.current);
     };
   }, [current.url]);
 
@@ -832,8 +844,8 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     const i = Math.max(0, (chIdx < 0 ? 0 : chIdx) - 1);
     setChIdx(i); setCurrent(channelList[i]);
     setShowQCH(true);
-    clearTimeout(qchTimer);
-    setQchTimer(setTimeout(() => setShowQCH(false), 2500));
+    clearTimeout(qchTimer.current);
+    qchTimer.current = setTimeout(() => setShowQCH(false), 2500);
     showOSD();
   }
 
@@ -843,8 +855,8 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     const i = Math.min(max, (chIdx < 0 ? 0 : chIdx) + 1);
     setChIdx(i); setCurrent(channelList[i]);
     setShowQCH(true);
-    clearTimeout(qchTimer);
-    setQchTimer(setTimeout(() => setShowQCH(false), 2500));
+    clearTimeout(qchTimer.current);
+    qchTimer.current = setTimeout(() => setShowQCH(false), 2500);
     showOSD();
   }
 
@@ -1374,7 +1386,6 @@ export default function App() {
   // ── Stalker lazy-load
   const [stalkerVodCats,    setStalkerVodCats]    = useState([]); // [{id,title,count}]
   const [stalkerSeriesCats, setStalkerSeriesCats] = useState([]); // [{id,title,count}]
-  const [loadedCatIds,      setLoadedCatIds]      = useState({ vod: new Set(), series: new Set() });
   const [catLoading,        setCatLoading]        = useState(false);
   const fetchingCatRef = useRef(new Set());  // tracks in-progress category fetches
   const [prefetchProgress, setPrefetchProgress] = useState(null); // {done,total} or null
@@ -1425,34 +1436,39 @@ export default function App() {
       if (acId) {
         try {
           const connObj = conns.find(c => c.id === acId);
-          if (connObj) {
-            const cachedChannels = await idbCache.get(`content:${acId}:live`);
-            if (cachedChannels && cachedChannels.length) {
-              setConn(connObj.config);
-              setChannels(cachedChannels);
-              setAutoConnected(true);
-              const [cachedVod, cachedSeries] = await Promise.all([
-                idbCache.get(`content:${acId}:vod`),
-                idbCache.get(`content:${acId}:series`),
-              ]);
-              if (cachedVod) setVod(cachedVod);
-              if (cachedSeries) setSeries(cachedSeries);
-              if (connObj.type === "stalker") {
-                const [vc, sc] = await Promise.all([
-                  idbCache.get(`cats:${acId}:vod`),
-                  idbCache.get(`cats:${acId}:series`),
-                ]);
-                if (vc) setStalkerVodCats(vc);
-                if (sc) setStalkerSeriesCats(sc);
-              }
-              const syncTs = await idbCache.get(`sync:${acId}`);
-              if (syncTs) setLastSynced(syncTs);
-            }
-          }
+          if (connObj) await loadFromCache(acId, connObj);
         } catch {}
       }
     })();
   }, []);
+
+  // ── load cached content from IDB for a connection
+  async function loadFromCache(id, connObj) {
+    const cachedChannels = await idbCache.get(`content:${id}:live`);
+    if (cachedChannels && cachedChannels.length) {
+      setAutoConnected(true);
+      setConn(connObj.config);
+      setChannels(cachedChannels);
+      const [cachedVod, cachedSeries] = await Promise.all([
+        idbCache.get(`content:${id}:vod`),
+        idbCache.get(`content:${id}:series`),
+      ]);
+      if (cachedVod) setVod(cachedVod);
+      if (cachedSeries) setSeries(cachedSeries);
+      if (connObj.type === "stalker") {
+        const [vc, sc] = await Promise.all([
+          idbCache.get(`cats:${id}:vod`),
+          idbCache.get(`cats:${id}:series`),
+        ]);
+        if (vc) setStalkerVodCats(vc);
+        if (sc) setStalkerSeriesCats(sc);
+      }
+      const syncTs = await idbCache.get(`sync:${id}`);
+      if (syncTs) setLastSynced(syncTs);
+      return true;
+    }
+    return false;
+  }
 
   // ── migrate old profile/lastConn data to connection system
   async function migrateToConnections() {
@@ -1636,11 +1652,6 @@ export default function App() {
   async function fetchStalkerChannels(force = false) {
     if (!conn || conn.type !== "stalker") return;
     const cId = connId(conn);
-    const transformChannels = (list) => list.map(ch => {
-      const raw = (ch.url || "").replace(/^ffmpeg\s+/, "").trim();
-      const isDirect = raw.startsWith("http") && !raw.includes("localhost");
-      return { ...ch, _stalkerCmd: ch.url, url: isDirect ? raw : null };
-    });
     // Check IDB first (permanent, no TTL)
     if (!force && cId) {
       const cached = await idbCache.get(`content:${cId}:live`);
@@ -1651,7 +1662,7 @@ export default function App() {
       const res = await fetch(`${PROXY}/stalker/channels?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      const items = transformChannels(data.channels || []);
+      const items = (data.channels || []).map(transformStalkerItem);
       setChannels(items);
       // Persist to IDB (permanent) + D1
       if (cId) {
@@ -1661,50 +1672,6 @@ export default function App() {
         setLastSynced(prev => { const n = { ...prev, live: now }; idbCache.set(`sync:${cId}`, n); return n; });
       }
     } catch(e) { console.error("Stalker channels error:", e); }
-    finally { setLoading(false); }
-  }
-
-  async function fetchStalkerVOD(force = false) {
-    if (!conn || conn.type !== "stalker" || (!force && vod.length)) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${PROXY}/stalker/vod?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      const items = (data.items || []).map(v => {
-        const raw = (v.url || "").replace(/^ffmpeg\s+/, "").trim();
-        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
-        const groupName = /^\d+$/.test(String(v.group)) ? "Movies" : (v.group || "Other");
-        return { ...v, group: groupName, _stalkerCmd: v.url, url: isDirect ? raw : null };
-      });
-      setVod(items);
-      const cId = connId(conn);
-      if (cId) {
-        idbCache.set(`content:${cId}:vod`, items);
-        syncContentToD1(cId, "vod", items);
-      }
-    } catch(e) { console.error("Stalker VOD error:", e); }
-    finally { setLoading(false); }
-  }
-
-  async function fetchStalkerSeries(force = false) {
-    if (!conn || conn.type !== "stalker" || (!force && series.length)) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${PROXY}/stalker/series?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      const items = (data.items || []).map(s => ({
-        ...s,
-        group: /^\d+$/.test(String(s.group)) ? "Series" : (s.group || "Other"),
-      }));
-      setSeries(items);
-      const cId = connId(conn);
-      if (cId) {
-        idbCache.set(`content:${cId}:series`, items);
-        syncContentToD1(cId, "series", items);
-      }
-    } catch(e) { console.error("Stalker series error:", e); }
     finally { setLoading(false); }
   }
 
@@ -1751,16 +1718,10 @@ export default function App() {
     const cId = connId(conn);
     const CACHE_KEY = cId ? `catitems:${cId}:${sec}:${catId}` : `sv-s-${sec}item-${conn.server}-${catId}`;
     const applyItems = (items) => {
-      const mapped = items.map(item => {
-        // Skip transform if already transformed (loaded from IDB with _stalkerCmd)
-        if (item._stalkerCmd !== undefined) return { ...item, group: catTitle };
-        const raw = (item.url || "").replace(/^ffmpeg\s+/, "").trim();
-        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
-        return { ...item, group: catTitle, _stalkerCmd: item.url, url: isDirect ? raw : null };
-      });
+      const mapped = items.map(item => ({ ...transformStalkerItem(item), group: catTitle }));
       if (sec === "vod") setVod(prev => [...prev.filter(v => v.group !== catTitle), ...mapped]);
       else setSeries(prev => [...prev.filter(s => s.group !== catTitle), ...mapped]);
-      setLoadedCatIds(prev => ({ ...prev, [sec]: new Set([...prev[sec], catId]) }));
+
     };
     if (!force) {
       try {
@@ -1780,12 +1741,7 @@ export default function App() {
       const items = data.items || [];
       applyItems(items);
       // Save transformed items to IDB (permanent)
-      const transformed = items.map(item => {
-        const raw = (item.url || "").replace(/^ffmpeg\s+/, "").trim();
-        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
-        return { ...item, _stalkerCmd: item.url, url: isDirect ? raw : null };
-      });
-      idbCache.set(CACHE_KEY, transformed);
+      idbCache.set(CACHE_KEY, items.map(transformStalkerItem));
     } catch(e) { console.error(`Stalker ${sec} cat items:`, e); }
     finally { if (!silent) setCatLoading(false); fetchingCatRef.current.delete(refKey); }
   }
@@ -2059,38 +2015,15 @@ export default function App() {
     // Clear current content
     setChannels([]); setVod([]); setSeries([]);
     setStalkerVodCats([]); setStalkerSeriesCats([]);
-    setLoadedCatIds({ vod: new Set(), series: new Set() });
+
     fetchingCatRef.current.clear(); setPrefetchProgress(null);
     setPlaying(null); setCat("All");
     // Set active and load from IDB
     setActiveConnId(id);
     db.set("sv-activeConn", id);
     (async () => {
-      const cachedChannels = await idbCache.get(`content:${id}:live`);
-      if (cachedChannels && cachedChannels.length) {
-        setConn(target.config);
-        setChannels(cachedChannels);
-        setAutoConnected(true);
-        const [cachedVod, cachedSeries] = await Promise.all([
-          idbCache.get(`content:${id}:vod`),
-          idbCache.get(`content:${id}:series`),
-        ]);
-        if (cachedVod) setVod(cachedVod);
-        if (cachedSeries) setSeries(cachedSeries);
-        if (target.type === "stalker") {
-          const [vc, sc] = await Promise.all([
-            idbCache.get(`cats:${id}:vod`),
-            idbCache.get(`cats:${id}:series`),
-          ]);
-          if (vc) setStalkerVodCats(vc);
-          if (sc) setStalkerSeriesCats(sc);
-        }
-        const syncTs = await idbCache.get(`sync:${id}`);
-        if (syncTs) setLastSynced(syncTs);
-      } else {
-        // No cache — reconnect from provider
-        setConn(target.config);
-      }
+      const loaded = await loadFromCache(id, target);
+      if (!loaded) setConn(target.config);
     })();
   }
 
@@ -2133,7 +2066,7 @@ export default function App() {
   function disconnect() {
     setConn(null); setChannels([]); setVod([]); setSeries([]);
     setStalkerVodCats([]); setStalkerSeriesCats([]);
-    setLoadedCatIds({ vod: new Set(), series: new Set() });
+
     fetchingCatRef.current.clear(); setPrefetchProgress(null);
     setSection("live"); setPlaying(null); setCat("All");
     setActiveConnId(null);
@@ -2172,6 +2105,12 @@ export default function App() {
   const continueItems = useMemo(() =>
     history.filter(h => h.position > 5 && h.type !== "live").slice(0, 20),
   [history]);
+
+  const historyMap = useMemo(() => {
+    const m = new Map();
+    for (const h of history) m.set(h.id || h.url, h);
+    return m;
+  }, [history]);
 
   // ── global search
   const searchResults = useMemo(() => {
@@ -2275,7 +2214,6 @@ export default function App() {
                       setVod(section === "vod" ? [] : vod);
                       setSeries(section === "series" ? [] : series);
                       if (section === "vod") setStalkerVodCats([]); else setStalkerSeriesCats([]);
-                      setLoadedCatIds(prev => ({ ...prev, [section]: new Set() }));
                       fetchingCatRef.current.clear();
                       setCat(null);
                       loadStalkerCats(section, true);
@@ -2434,7 +2372,7 @@ export default function App() {
                   <div className="vod-grid">
                     {paginatedItems.map((item,i) => {
                       const faved = isFav(item);
-                      const hist = history.find(h=>(h.id||h.url)===(item.id||item.url));
+                      const hist = historyMap.get(item.id || item.url);
                       const pct = hist?.position && hist?.duration ? Math.min(100, (hist.position/hist.duration)*100) : 0;
                       return (
                         <div key={item.id||i} className="vod-card" onClick={() => playItem(item)} title={item.name}>
@@ -2475,7 +2413,7 @@ export default function App() {
       {/* ── PLAYER ── */}
       {playing && (
         <Player item={playing}
-          channelList={playing.type==="live" ? channels.filter(c=>c.group===playing.group||true) : null}
+          channelList={playing.type==="live" ? channels : null}
           epgData={epgData}
           onClose={() => setPlaying(null)}
           toggleFav={toggleFav}
@@ -2724,16 +2662,20 @@ function EPGView({ channels, epgData, epgURL, setEpgURL, epgLoading, loadEPG, on
   const [urlInput, setUrlInput] = useState(epgURL||"");
   const [search, setSearch] = useState("");
 
-  // Build 8-slot time window centred on current hour
+  // Build 8-slot time window centred on current hour (recomputes hourly)
+  const [epgHour, setEpgHour] = useState(() => new Date().getHours());
+  useEffect(() => {
+    const id = setInterval(() => setEpgHour(new Date().getHours()), 60000);
+    return () => clearInterval(id);
+  }, []);
   const slots = useMemo(() => {
-    const nowH = new Date().getHours();
-    const startH = Math.max(0, nowH - 1);
+    const startH = Math.max(0, epgHour - 1);
     return Array.from({length:8}, (_,i) => {
       const h = startH + i;
       const base = new Date(); base.setHours(h, 0, 0, 0);
       return { label: `${String(h % 24).padStart(2,"0")}:00`, startMs: base.getTime(), endMs: base.getTime() + 3600000 };
     });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [epgHour]);
 
   const filteredChannels = useMemo(() => {
     if (!search) return channels;
@@ -2929,7 +2871,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
 
   const hero = trending[0];
 
-  function TMDBCard({ item }) {
+  const TMDBCard = useCallback(({ item }) => {
     const matches = findAllInLibrary(item);
     const inLib   = matches.length > 0;
     const poster  = item.poster_path ? `${TMDB_IMG}w185${item.poster_path}` : null;
@@ -2949,7 +2891,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
         <div className="disc-card-meta">{[year, item.media_type === "tv" ? "TV" : "Film"].filter(Boolean).join(" · ")}</div>
       </div>
     );
-  }
+  }, [findAllInLibrary, handleCardClick]);
 
   return (
     <div className="discover-body">
