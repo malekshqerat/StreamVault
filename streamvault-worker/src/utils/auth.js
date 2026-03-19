@@ -6,6 +6,6 @@ export function getGuestId(request) {
 
 export async function ensureUser(db, guestId) {
   await db.prepare(
-    "INSERT OR IGNORE INTO users (id) VALUES (?)"
+    "INSERT INTO users (id, last_active) VALUES (?, unixepoch()) ON CONFLICT(id) DO UPDATE SET last_active = unixepoch()"
   ).bind(guestId).run();
 }

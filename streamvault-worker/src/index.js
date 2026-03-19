@@ -9,6 +9,7 @@ import {
 } from "./handlers/stalker.js";
 import { handleStream, handleStreamHead } from "./handlers/stream.js";
 import { handleProxy } from "./handlers/proxy.js";
+import { handleCleanup } from "./handlers/cleanup.js";
 import {
   handlePutContent, handleGetContent, handleDeleteContent,
   handlePutConnection, handleGetConnections, handleDeleteConnection,
@@ -120,7 +121,18 @@ export default {
       return handleApi(url, env);
     }
 
+    // Manual cleanup trigger (admin)
+    if (pathname === "/api/cleanup" && method === "POST") {
+      const result = await handleCleanup(env);
+      return jsonResponse(result);
+    }
+
     // 404
     return jsonResponse({ error: "Not found" }, 404);
+  },
+
+  // Cron trigger — runs daily at 3am UTC
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(handleCleanup(env));
   },
 };
