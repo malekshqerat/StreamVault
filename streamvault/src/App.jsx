@@ -30,12 +30,15 @@ function scheduleCloudSync() {
   clearTimeout(_syncTimer);
   _syncTimer = setTimeout(async () => {
     try {
-      const keys = ["sv-theme","sv-profiles","sv-activeProfile","sv-history","sv-hiddenCats","sv-epgURL","sv-lastConn"];
+      const keys = ["sv-theme","sv-connections","sv-activeConn","sv-hiddenCats","sv-epgURL","sv-lastSection"];
       const data = {};
       for (const k of keys) { const v = localStorage.getItem(k); if (v !== null) data[k] = JSON.parse(v); }
-      // Also save per-profile favorites
-      const profiles = data["sv-profiles"] || [];
-      for (const p of profiles) { const fk = `sv-favs-${p.id}`; const v = localStorage.getItem(fk); if (v !== null) data[fk] = JSON.parse(v); }
+      // Also save per-connection favorites + history
+      const connections = data["sv-connections"] || [];
+      for (const c of connections) {
+        const fk = `sv-favs-${c.id}`; const v = localStorage.getItem(fk); if (v !== null) data[fk] = JSON.parse(v);
+        const hk = `sv-history-${c.id}`; const hv = localStorage.getItem(hk); if (hv !== null) data[hk] = JSON.parse(hv);
+      }
       await fetch("/api/session", { method: "POST", headers: {"Content-Type":"application/json"},
         body: JSON.stringify({ guestId: GUEST_ID, data }) }).catch(() => {});
     } catch {}
@@ -118,8 +121,8 @@ function syncConnectionToD1(id, type, config) {
   catalogAPI("connections", { method: "PUT", body: { id, type, config } });
 }
 
-function syncFavoritesToD1(profileId, favorites) {
-  catalogAPI("favorites", { method: "PUT", body: { profileId, favorites } });
+function syncFavoritesToD1(connectionId, favorites) {
+  catalogAPI("favorites", { method: "PUT", body: { profileId: connectionId, favorites } });
 }
 
 function syncHistoryToD1(history) {
@@ -336,13 +339,16 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .btn-sm.danger{color:var(--danger);border-color:#ff446620}
 .btn-sm.danger:hover{background:#ff446612}
 
-/* PROFILES */
-.profiles-row{display:flex;align-items:center;gap:.4rem;padding:0 1rem;margin-bottom:.6rem;flex-wrap:wrap}
-.profile-dot{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-size:.65rem;font-weight:700;cursor:pointer;border:2px solid transparent;transition:all .2s;color:#000;flex-shrink:0}
-.profile-dot.active{border-color:var(--t1);transform:scale(1.1)}
-.profile-dot.add{background:var(--s3) !important;color:var(--t2);font-size:1rem;border-color:var(--b2)}
-.profile-name{font-size:.68rem;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 1rem;margin-bottom:.2rem}
+/* CONNECTION CARD */
+.conn-card{margin:0 .6rem .8rem;padding:.55rem .65rem;background:var(--s2);border:1px solid var(--b2);
+  border-left:3px solid var(--accent);border-radius:8px;cursor:pointer;transition:all .2s}
+.conn-card:hover{border-color:var(--accent);background:var(--s3)}
+.conn-card-row{display:flex;align-items:center;gap:.5rem}
+.conn-card-icon{font-size:1rem;flex-shrink:0}
+.conn-card-info{flex:1;min-width:0}
+.conn-card-label{font-size:.75rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-card-stats{font-size:.62rem;color:var(--t3)}
+.conn-card-switch{font-size:.6rem;color:var(--accent);text-align:right;margin-top:.25rem;font-weight:600}
 
 /* CONTENT */
 .content{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -527,10 +533,6 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:400;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)}
 .modal{background:var(--s1);border:1px solid var(--b2);border-radius:14px;padding:1.5rem;width:100%;max-width:360px;box-shadow:0 24px 60px #000000a0}
 .modal-title{font-family:'Rajdhani',sans-serif;font-size:1.2rem;font-weight:700;margin-bottom:1.2rem}
-.profile-edit-row{display:flex;gap:.5rem;margin-bottom:1rem;align-items:center}
-.profile-color-pick{display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:1rem}
-.pcp{width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:all .2s;flex-shrink:0}
-.pcp.on{border-color:var(--t1);transform:scale(1.15)}
 .modal-btns{display:flex;gap:.5rem;justify-content:flex-end}
 .btn-cancel{padding:.45rem .9rem;background:var(--s2);border:1px solid var(--b2);border-radius:7px;
   color:var(--t2);font-family:'DM Sans',sans-serif;font-size:.8rem;cursor:pointer}
@@ -950,21 +952,28 @@ function Setup({ onConnect }) {
   const set = (k,v) => setF(p => ({...p,[k]:v}));
 
   useEffect(() => {
-    const saved = localStorage.getItem("sv-lastConn");
-    if (saved) {
-      try {
-        const c = JSON.parse(saved);
-        if (c.type) setType(c.type);
-        if (c.server) set("server", c.server);
-        if (c.user) set("user", c.user);
-        if (c.pass) set("pass", c.pass);
-        if (c.mac) set("mac", c.mac);
-        if (c.url) set("url", c.url);
-        if (c.serial) set("serial", c.serial);
-        if (c.deviceId) set("deviceId", c.deviceId);
-        if (c.deviceId2) set("deviceId2", c.deviceId2);
-      } catch {}
-    }
+    // Pre-fill from last active connection if available
+    try {
+      const acId = localStorage.getItem("sv-activeConn");
+      const conns = localStorage.getItem("sv-connections");
+      if (acId && conns) {
+        const activeId = JSON.parse(acId);
+        const connList = JSON.parse(conns);
+        const active = connList.find(c => c.id === activeId);
+        if (active?.config) {
+          const c = active.config;
+          if (c.type) setType(c.type);
+          if (c.server) set("server", c.server);
+          if (c.user) set("user", c.user);
+          if (c.pass) set("pass", c.pass);
+          if (c.mac) set("mac", c.mac);
+          if (c.url) set("url", c.url);
+          if (c.serial) set("serial", c.serial);
+          if (c.deviceId) set("deviceId", c.deviceId);
+          if (c.deviceId2) set("deviceId2", c.deviceId2);
+        }
+      }
+    } catch {}
   }, []);
 
   async function connect() {
@@ -976,7 +985,7 @@ function Setup({ onConnect }) {
         const api = makeXtreamAPI(server, f.user, f.pass);
         const data = await api.auth();
         if (data?.user_info?.auth === 0) throw new Error("Invalid credentials");
-        localStorage.setItem("sv-lastConn", JSON.stringify({ type, ...f }));
+        // Connection saved by handleConnect in App
         onConnect({ type, server, user:f.user, pass:f.pass, info:data?.user_info });
       } else if (type === "m3u") {
         if (!f.url) throw new Error("Playlist URL required");
@@ -986,7 +995,7 @@ function Setup({ onConnect }) {
         if (!text.includes("#EXTM3U")) throw new Error("Not a valid M3U playlist");
         const channels = parseM3U(text);
         if (!channels.length) throw new Error("No channels found");
-        localStorage.setItem("sv-lastConn", JSON.stringify({ type, ...f }));
+        // Connection saved by handleConnect in App
         onConnect({ type, url:f.url, channels });
       } else if (type === "stalker") {
         if (!f.server||!f.mac) throw new Error("Portal URL and MAC required");
@@ -997,10 +1006,10 @@ function Setup({ onConnect }) {
         });
         const hsData = await hs.json();
         if (!hs.ok || hsData.error) throw new Error(hsData.error || "Stalker handshake failed");
-        localStorage.setItem("sv-lastConn", JSON.stringify({ type, ...f }));
+        // Connection saved by handleConnect in App
         onConnect({ type, server, mac:f.mac.trim(), serial:f.serial.trim()||undefined, deviceId:f.deviceId.trim()||undefined, deviceId2:(f.deviceId2.trim()||f.deviceId.trim())||undefined });
       } else {
-        localStorage.setItem("sv-lastConn", JSON.stringify({ type, ...f }));
+        // Connection saved by handleConnect in App
         onConnect({ type:"hls" });
       }
     } catch(e) { setErr(e.message||"Connection failed"); }
@@ -1240,27 +1249,43 @@ function Setup({ onConnect }) {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// PROFILE MODAL
+// CONNECTION MANAGER MODAL
 // ══════════════════════════════════════════════════════════════════
-function ProfileModal({ onSave, onCancel }) {
-  const [name, setName]   = useState("Profile");
-  const [color, setColor] = useState(PROFILE_COLORS[0]);
+const CONN_ICONS = { xtream:"📡", stalker:"📺", m3u:"📋", hls:"🔗" };
+
+function ConnectionManager({ connections, activeConnId, onSwitch, onRemove, onAddNew, onClose }) {
   return (
-    <div className="modal-ov" onClick={e => e.target===e.currentTarget && onCancel()}>
-      <div className="modal">
-        <div className="modal-title">New Profile</div>
-        <div className="profile-edit-row">
-          <input className="fi" style={{flex:1}} placeholder="Profile name" value={name} onChange={e=>setName(e.target.value)} />
-        </div>
-        <div style={{fontSize:".7rem",color:"var(--t3)",marginBottom:".5rem",textTransform:"uppercase",letterSpacing:".08em",fontWeight:600}}>Colour</div>
-        <div className="profile-color-pick">
-          {PROFILE_COLORS.map(c => (
-            <div key={c} className={`pcp ${color===c?"on":""}`} style={{background:c}} onClick={() => setColor(c)} />
+    <div className="modal-ov" onClick={e => e.target===e.currentTarget && onClose()}>
+      <div className="modal" style={{maxWidth:"420px"}}>
+        <div className="modal-title">Connections</div>
+        <div style={{display:"flex",flexDirection:"column",gap:".4rem",marginBottom:"1rem",maxHeight:"300px",overflowY:"auto"}}>
+          {connections.map(c => (
+            <div key={c.id} style={{display:"flex",alignItems:"center",gap:".6rem",padding:".55rem .7rem",
+              background: c.id===activeConnId ? "var(--accent)10" : "var(--s2)",
+              border: `1px solid ${c.id===activeConnId ? "var(--accent)" : "var(--b2)"}`,
+              borderLeft: `3px solid ${c.color}`,
+              borderRadius:"8px",cursor:"pointer",transition:"all .2s"}}
+              onClick={() => { if (c.id !== activeConnId) onSwitch(c.id); }}>
+              <span style={{fontSize:"1rem"}}>{CONN_ICONS[c.type] || "📡"}</span>
+              <div style={{flex:1,overflow:"hidden"}}>
+                <div style={{fontSize:".8rem",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.label}</div>
+                <div style={{fontSize:".65rem",color:"var(--t3)",textTransform:"capitalize"}}>{c.type}</div>
+              </div>
+              {c.id === activeConnId && <span style={{fontSize:".6rem",fontWeight:700,color:"var(--accent)",textTransform:"uppercase",letterSpacing:".05em"}}>Active</span>}
+              {c.id !== activeConnId && (
+                <button style={{background:"none",border:"none",cursor:"pointer",fontSize:".75rem",color:"var(--danger)",padding:".2rem .3rem",transition:"opacity .2s"}}
+                  title="Remove connection"
+                  onClick={e => { e.stopPropagation(); onRemove(c.id); }}>✕</button>
+              )}
+            </div>
           ))}
+          {connections.length === 0 && (
+            <div style={{fontSize:".8rem",color:"var(--t3)",textAlign:"center",padding:"1rem"}}>No saved connections</div>
+          )}
         </div>
         <div className="modal-btns">
-          <button className="btn-cancel" onClick={onCancel}>Cancel</button>
-          <button className="btn-confirm" onClick={() => onSave({id:uid(), name:name||"Profile", color})}>Create</button>
+          <button className="btn-cancel" onClick={onClose}>Close</button>
+          <button className="btn-confirm" onClick={onAddNew}>+ Add Connection</button>
         </div>
       </div>
     </div>
@@ -1308,7 +1333,9 @@ export default function App() {
   const [episodeLoading, setEpisodeLoading] = useState(null); // episode number being loaded
 
   // ── ui state
-  const [section, setSection] = useState("live");
+  const [section, setSection] = useState(() => {
+    try { return localStorage.getItem("sv-lastSection") ? JSON.parse(localStorage.getItem("sv-lastSection")) : "live"; } catch { return "live"; }
+  });
   const [cat, setCat]         = useState("All");
   const [search, setSearch]   = useState("");
   const [page, setPage] = useState(1);
@@ -1320,10 +1347,10 @@ export default function App() {
   // ── theme
   const [themeName, setThemeName] = useState("Dark");
 
-  // ── profiles
-  const [profiles, setProfiles]   = useState([{id:"default",name:"Me",color:PROFILE_COLORS[0]}]);
-  const [activeProfile, setActiveProfile] = useState("default");
-  const [showProfileModal, setShowProfileModal] = useState(false);
+  // ── connections (replaces profiles)
+  const [connections, setConnections] = useState([]);
+  const [activeConnId, setActiveConnId] = useState(null);
+  const [showConnManager, setShowConnManager] = useState(false);
 
   // ── favorites {live:{}, vod:{}, series:{}}
   const [favs, setFavs] = useState({live:{}, vod:{}, series:{}});
@@ -1363,56 +1390,102 @@ export default function App() {
   // ── load persisted data + auto-connect from IDB
   useEffect(() => {
     (async () => {
-      const [th, pr, ap, fv, hi, hc, eq] = await Promise.all([
+      // Migrate old profile/lastConn data to new connection system
+      await migrateToConnections();
+
+      const [th, conns, acId, hc, eq] = await Promise.all([
         db.get("sv-theme","Dark"),
-        db.get("sv-profiles",[{id:"default",name:"Me",color:PROFILE_COLORS[0]}]),
-        db.get("sv-activeProfile","default"),
-        db.get("sv-favs-default",{live:{},vod:{},series:{}}),
-        db.get("sv-history",[]),
+        db.get("sv-connections",[]),
+        db.get("sv-activeConn",null),
         db.get("sv-hiddenCats",{live:[],vod:[],series:[]}),
         db.get("sv-epgURL",""),
       ]);
       if (THEME_NAMES.includes(th)) setThemeName(th);
-      setProfiles(pr); setActiveProfile(ap);
-      setFavs(fv); setHistory(hi); setHiddenCats(hc);
+      setConnections(conns);
+      setActiveConnId(acId);
+      setHiddenCats(hc);
       if (eq) setEpgURL(eq);
 
-      // Auto-connect: if we have a saved connection + cached content in IDB, skip Setup
-      try {
-        const saved = localStorage.getItem("sv-lastConn");
-        if (saved) {
-          const lastConn = JSON.parse(saved);
-          const cId = connId(lastConn);
-          if (cId) {
-            const cachedChannels = await idbCache.get(`content:${cId}:live`);
+      // Load per-connection favs + history
+      if (acId) {
+        const [fv, hi] = await Promise.all([
+          db.get(`sv-favs-${acId}`, {live:{},vod:{},series:{}}),
+          db.get(`sv-history-${acId}`, []),
+        ]);
+        setFavs(fv);
+        setHistory(hi);
+      }
+
+      // Auto-connect: if we have an active connection + cached content in IDB, skip Setup
+      if (acId) {
+        try {
+          const connObj = conns.find(c => c.id === acId);
+          if (connObj) {
+            const cachedChannels = await idbCache.get(`content:${acId}:live`);
             if (cachedChannels && cachedChannels.length) {
-              setConn(lastConn);
+              setConn(connObj.config);
               setChannels(cachedChannels);
               setAutoConnected(true);
-              // Also load VOD, series, stalker categories from IDB
               const [cachedVod, cachedSeries] = await Promise.all([
-                idbCache.get(`content:${cId}:vod`),
-                idbCache.get(`content:${cId}:series`),
+                idbCache.get(`content:${acId}:vod`),
+                idbCache.get(`content:${acId}:series`),
               ]);
               if (cachedVod) setVod(cachedVod);
               if (cachedSeries) setSeries(cachedSeries);
-              if (lastConn.type === "stalker") {
+              if (connObj.type === "stalker") {
                 const [vc, sc] = await Promise.all([
-                  idbCache.get(`cats:${cId}:vod`),
-                  idbCache.get(`cats:${cId}:series`),
+                  idbCache.get(`cats:${acId}:vod`),
+                  idbCache.get(`cats:${acId}:series`),
                 ]);
                 if (vc) setStalkerVodCats(vc);
                 if (sc) setStalkerSeriesCats(sc);
               }
-              // Load last-synced timestamps
-              const syncTs = await idbCache.get(`sync:${cId}`);
+              const syncTs = await idbCache.get(`sync:${acId}`);
               if (syncTs) setLastSynced(syncTs);
             }
           }
-        }
-      } catch {}
+        } catch {}
+      }
     })();
   }, []);
+
+  // ── migrate old profile/lastConn data to connection system
+  async function migrateToConnections() {
+    try {
+      if (localStorage.getItem("sv-connections")) return; // already migrated
+      const saved = localStorage.getItem("sv-lastConn");
+      if (!saved) return;
+      const lastConn = JSON.parse(saved);
+      const cId = connId(lastConn);
+      if (!cId) return;
+      const color = PROFILE_COLORS[0];
+      const label = lastConn.type === "xtream" ? `${lastConn.user} · Xtream`
+        : lastConn.type === "stalker" ? `Stalker · ${(lastConn.mac||"").slice(-5)}`
+        : lastConn.type === "m3u" ? `M3U · ${(lastConn.url||"").split("/").pop()?.slice(0,20)||"playlist"}`
+        : "Direct HLS";
+      const connObj = { id: cId, type: lastConn.type, label, color, config: lastConn };
+      db.set("sv-connections", [connObj]);
+      db.set("sv-activeConn", cId);
+      // Migrate favorites: try active profile first, then default
+      const ap = localStorage.getItem("sv-activeProfile");
+      const activeProfileId = ap ? JSON.parse(ap) : "default";
+      const oldFavs = localStorage.getItem(`sv-favs-${activeProfileId}`);
+      if (oldFavs) {
+        db.set(`sv-favs-${cId}`, JSON.parse(oldFavs));
+      } else {
+        const defFavs = localStorage.getItem("sv-favs-default");
+        if (defFavs) db.set(`sv-favs-${cId}`, JSON.parse(defFavs));
+      }
+      // Migrate global history to per-connection
+      const oldHistory = localStorage.getItem("sv-history");
+      if (oldHistory) db.set(`sv-history-${cId}`, JSON.parse(oldHistory));
+      // Clean up old keys
+      localStorage.removeItem("sv-profiles");
+      localStorage.removeItem("sv-activeProfile");
+      localStorage.removeItem("sv-lastConn");
+      localStorage.removeItem("sv-history");
+    } catch {}
+  }
 
   // ── save theme
   useEffect(() => {
@@ -1420,10 +1493,17 @@ export default function App() {
     syncPreferencesToD1({ theme: themeName });
   }, [themeName]);
 
-  // ── load favs when profile changes
+  // ── load favs + history when active connection changes
   useEffect(() => {
-    db.get(`sv-favs-${activeProfile}`, {live:{},vod:{},series:{}}).then(setFavs);
-  }, [activeProfile]);
+    if (!activeConnId) return;
+    db.get(`sv-favs-${activeConnId}`, {live:{},vod:{},series:{}}).then(setFavs);
+    db.get(`sv-history-${activeConnId}`, []).then(setHistory);
+  }, [activeConnId]);
+
+  // ── persist section to localStorage
+  useEffect(() => {
+    localStorage.setItem("sv-lastSection", JSON.stringify(section));
+  }, [section]);
 
   // ── connection
   useEffect(() => {
@@ -1814,8 +1894,10 @@ export default function App() {
     if (newFavs[type][key]) delete newFavs[type][key];
     else newFavs[type][key] = { id:item.id, name:item.name, url:item.url, logo:item.logo, group:item.group, type };
     setFavs(newFavs);
-    db.set(`sv-favs-${activeProfile}`, newFavs);
-    syncFavoritesToD1(activeProfile, newFavs);
+    if (activeConnId) {
+      db.set(`sv-favs-${activeConnId}`, newFavs);
+      syncFavoritesToD1(activeConnId, newFavs);
+    }
   }
 
   function isFav(item) {
@@ -1828,7 +1910,9 @@ export default function App() {
     const entry = { ...item, timestamp: Date.now(), position: 0 };
     const newH = [entry, ...history.filter(h => (h.id||h.url) !== (item.id||item.url))].slice(0, 60);
     setHistory(newH);
-    db.set("sv-history", newH);
+    if (activeConnId) {
+      db.set(`sv-history-${activeConnId}`, newH);
+    }
     syncHistoryToD1(newH);
   }
 
@@ -1934,19 +2018,89 @@ export default function App() {
     }
   }
 
-  // ── profiles
-  function addProfile(p) {
-    const newP = [...profiles, p];
-    setProfiles(newP);
-    db.set("sv-profiles", newP);
-    setActiveProfile(p.id);
-    db.set("sv-activeProfile", p.id);
-    setShowProfileModal(false);
+  // ── connection management
+  function makeConnectionLabel(type, config) {
+    if (type === "xtream") return `${config.user} · Xtream`;
+    if (type === "stalker") return `Stalker · ${(config.mac||"").slice(-5)}`;
+    if (type === "m3u") return `M3U · ${(config.url||"").split("/").pop()?.slice(0,20)||"playlist"}`;
+    return "Direct HLS";
   }
 
-  function switchProfile(id) {
-    setActiveProfile(id);
-    db.set("sv-activeProfile", id);
+  function saveConnection(connConfig) {
+    const cId = connId(connConfig);
+    if (!cId) return;
+    const existing = connections.find(c => c.id === cId);
+    if (existing) {
+      // Already saved — just activate
+      setActiveConnId(cId);
+      db.set("sv-activeConn", cId);
+      return;
+    }
+    const usedColors = new Set(connections.map(c => c.color));
+    const color = PROFILE_COLORS.find(c => !usedColors.has(c)) || PROFILE_COLORS[connections.length % PROFILE_COLORS.length];
+    const connObj = { id: cId, type: connConfig.type, label: makeConnectionLabel(connConfig.type, connConfig), color, config: connConfig };
+    const newConns = [...connections, connObj];
+    setConnections(newConns);
+    setActiveConnId(cId);
+    db.set("sv-connections", newConns);
+    db.set("sv-activeConn", cId);
+  }
+
+  function switchConnection(id) {
+    if (id === activeConnId) { setShowConnManager(false); return; }
+    const target = connections.find(c => c.id === id);
+    if (!target) return;
+    setShowConnManager(false);
+    // Clear current content
+    setChannels([]); setVod([]); setSeries([]);
+    setStalkerVodCats([]); setStalkerSeriesCats([]);
+    setLoadedCatIds({ vod: new Set(), series: new Set() });
+    fetchingCatRef.current.clear(); setPrefetchProgress(null);
+    setPlaying(null); setCat("All");
+    // Set active and load from IDB
+    setActiveConnId(id);
+    db.set("sv-activeConn", id);
+    (async () => {
+      const cachedChannels = await idbCache.get(`content:${id}:live`);
+      if (cachedChannels && cachedChannels.length) {
+        setConn(target.config);
+        setChannels(cachedChannels);
+        setAutoConnected(true);
+        const [cachedVod, cachedSeries] = await Promise.all([
+          idbCache.get(`content:${id}:vod`),
+          idbCache.get(`content:${id}:series`),
+        ]);
+        if (cachedVod) setVod(cachedVod);
+        if (cachedSeries) setSeries(cachedSeries);
+        if (target.type === "stalker") {
+          const [vc, sc] = await Promise.all([
+            idbCache.get(`cats:${id}:vod`),
+            idbCache.get(`cats:${id}:series`),
+          ]);
+          if (vc) setStalkerVodCats(vc);
+          if (sc) setStalkerSeriesCats(sc);
+        }
+        const syncTs = await idbCache.get(`sync:${id}`);
+        if (syncTs) setLastSynced(syncTs);
+      } else {
+        // No cache — reconnect from provider
+        setConn(target.config);
+      }
+    })();
+  }
+
+  function removeConnection(id) {
+    const newConns = connections.filter(c => c.id !== id);
+    setConnections(newConns);
+    db.set("sv-connections", newConns);
+    // Clean up per-connection data
+    localStorage.removeItem(`sv-favs-${id}`);
+    localStorage.removeItem(`sv-history-${id}`);
+  }
+
+  function addNewConnection() {
+    setShowConnManager(false);
+    disconnect();
   }
 
   // ── hidden cats
@@ -1977,6 +2131,8 @@ export default function App() {
     setLoadedCatIds({ vod: new Set(), series: new Set() });
     fetchingCatRef.current.clear(); setPrefetchProgress(null);
     setSection("live"); setPlaying(null); setCat("All");
+    setActiveConnId(null);
+    db.set("sv-activeConn", null);
   }
 
   // ── DERIVED DATA
@@ -2019,15 +2175,21 @@ export default function App() {
     return [...channels, ...vod, ...series].filter(i => i.name?.toLowerCase().includes(q)).slice(0, 80);
   }, [globalQ, channels, vod, series]);
 
+  function handleConnect(connConfig) {
+    saveConnection(connConfig);
+    setConn(connConfig);
+  }
+
   if (!conn) return (
     <>
       <style>{genCSS(THEMES[themeName])}</style>
-      <Setup onConnect={setConn} />
+      <Setup onConnect={handleConnect} />
     </>
   );
 
   const LABEL = {discover:"Discover",live:"Live TV",vod:"Movies",series:"Series",favs:"Favorites",continue:"Continue Watching",epg:"TV Guide",search:"Global Search",hls:"Direct Play"};
-  const activeProfile_obj = profiles.find(p=>p.id===activeProfile) || profiles[0];
+  const activeConnection = connections.find(c => c.id === activeConnId);
+  const channelCount = channels.length + vod.length + series.length;
   const curCats = ["live","vod","series"].includes(section) ? curCatsAll : [];
   const curItems = ["live","vod","series"].includes(section) ? curItemsAll : [];
   const totalPages = Math.ceil(curItems.length / PAGE_SIZE);
@@ -2039,20 +2201,20 @@ export default function App() {
       <div className="sidebar">
         <div className="s-logo">STREAMVAULT</div>
 
-        {/* Profiles */}
-        <div className="profiles-row">
-          {profiles.map(p => (
-            <div key={p.id} className={`profile-dot ${p.id===activeProfile?"active":""}`}
-              style={{background:p.color}} title={p.name}
-              onClick={() => switchProfile(p.id)}>
-              {p.name[0]?.toUpperCase()}
+        {/* Connection Card */}
+        {activeConnection && (
+          <div className="conn-card" style={{borderLeftColor: activeConnection.color}}
+            onClick={() => setShowConnManager(true)} title="Switch connection">
+            <div className="conn-card-row">
+              <span className="conn-card-icon">{CONN_ICONS[activeConnection.type] || "📡"}</span>
+              <div className="conn-card-info">
+                <div className="conn-card-label">{activeConnection.label}</div>
+                <div className="conn-card-stats">{channelCount.toLocaleString()} items</div>
+              </div>
             </div>
-          ))}
-          {profiles.length < 4 && (
-            <div className="profile-dot add" onClick={() => setShowProfileModal(true)} title="Add profile">+</div>
-          )}
-        </div>
-        <div className="profile-name">{activeProfile_obj?.name}</div>
+            <div className="conn-card-switch">▼ Switch</div>
+          </div>
+        )}
 
         {/* Themes */}
         <div className="theme-row">
@@ -2415,9 +2577,16 @@ export default function App() {
         </div>
       )}
 
-      {/* ── PROFILE MODAL ── */}
-      {showProfileModal && (
-        <ProfileModal onSave={addProfile} onCancel={() => setShowProfileModal(false)} />
+      {/* ── CONNECTION MANAGER ── */}
+      {showConnManager && (
+        <ConnectionManager
+          connections={connections}
+          activeConnId={activeConnId}
+          onSwitch={switchConnection}
+          onRemove={removeConnection}
+          onAddNew={addNewConnection}
+          onClose={() => setShowConnManager(false)}
+        />
       )}
     </div>
   );
