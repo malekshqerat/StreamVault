@@ -28,25 +28,9 @@ function getGuestId() {
 }
 const GUEST_ID = getGuestId();
 
-let _syncTimer = null;
-function scheduleCloudSync() {
-  clearTimeout(_syncTimer);
-  _syncTimer = setTimeout(async () => {
-    try {
-      const keys = ["sv-theme","sv-connections","sv-activeConn","sv-hiddenCats","sv-epgURL","sv-lastSection"];
-      const data = {};
-      for (const k of keys) { const v = localStorage.getItem(k); if (v !== null) data[k] = JSON.parse(v); }
-      // Also save per-connection favorites + history
-      const connections = data["sv-connections"] || [];
-      for (const c of connections) {
-        const fk = `sv-favs-${c.id}`; const v = localStorage.getItem(fk); if (v !== null) data[fk] = JSON.parse(v);
-        const hk = `sv-history-${c.id}`; const hv = localStorage.getItem(hk); if (hv !== null) data[hk] = JSON.parse(hv);
-      }
-      await fetch(`${CATALOG_API}/api/session`, { method: "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ guestId: GUEST_ID, data }) }).catch(() => {});
-    } catch {}
-  }, 5000);
-}
+// Cloud sync is handled by per-connection D1 catalog API (syncContentToD1, etc.)
+// Legacy session sync disabled — no /api/session endpoint on CF Worker
+function scheduleCloudSync() {}
 
 const db = {
   async get(key, fallback = null) {
@@ -173,18 +157,8 @@ async function migrateOldCache() {
 }
 migrateOldCache();
 
-// On first load, try to restore from cloud if localStorage is empty
-(async () => {
-  try {
-    if (localStorage.getItem("sv-theme") || localStorage.getItem("sv-cloud-restored")) return;
-    const res = await fetch(`${CATALOG_API}/api/session?id=${GUEST_ID}`);
-    const { data } = await res.json();
-    if (!data || !Object.keys(data).length) return;
-    for (const [k, v] of Object.entries(data)) { localStorage.setItem(k, JSON.stringify(v)); }
-    localStorage.setItem("sv-cloud-restored", "1");
-    window.location.reload();
-  } catch {}
-})();
+// Cloud restore disabled — D1 catalog API handles persistence per-connection
+// Future: restore connections list from D1 on first load
 
 // ══════════════════════════════════════════════════════════════════
 // UTILS
@@ -663,11 +637,20 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     function startHls(u) {
       if (window.Hls?.isSupported()) {
         const opts = { enableWorker: false, fragLoadingMaxRetry: 2 };
-        // On HTTPS pages, proxy HTTP streams through Cloudflare Worker
+        // On HTTPS pages, proxy HTTP streams through proxy
         if (isMixed(u)) {
+          // Extract original server origin for rewriting relative segment paths
+          const origOrigin = new URL(u).origin; // e.g. http://portal5458.com:8080
           u = streamProxy(u);
           opts.xhrSetup = (xhr, xhrUrl) => {
-            if (xhrUrl.startsWith("http://")) xhr.open("GET", streamProxy(xhrUrl));
+            if (xhrUrl.startsWith("http://")) {
+              xhr.open("GET", streamProxy(xhrUrl));
+            } else if ((xhrUrl.startsWith(STREAM_PROXY) || xhrUrl.startsWith(PROXY)) && !xhrUrl.includes("/stream?")) {
+              // Relative segment resolved against proxy origin (e.g. koyeb.app/hlsr/...)
+              // Rewrite to original server + proxy through /stream
+              const path = new URL(xhrUrl).pathname;
+              xhr.open("GET", streamProxy(`${origOrigin}${path}`));
+            }
           };
         }
         const hls = new window.Hls(opts);
