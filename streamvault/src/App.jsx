@@ -4,6 +4,13 @@ const PROXY = import.meta.env.VITE_PROXY_URL || "http://localhost:3001";
 const STREAM_PROXY = import.meta.env.VITE_STREAM_PROXY_URL || PROXY;
 const CATALOG_API = import.meta.env.VITE_CATALOG_URL || PROXY;
 
+// Try CF Worker first (always-open CORS), fall back to Koyeb
+async function stalkerFetch(path) {
+  let res = await fetch(`${CATALOG_API}${path}`).catch(() => null);
+  if (!res?.ok) res = await fetch(`${PROXY}${path}`);
+  return res;
+}
+
 // ══════════════════════════════════════════════════════════════════
 // THEMES (OTT Navigator style multi-theme)
 // ══════════════════════════════════════════════════════════════════
@@ -1662,7 +1669,7 @@ export default function App() {
     }
     setLoading(true);
     try {
-      const res = await fetch(`${PROXY}/stalker/channels?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+      const res = await stalkerFetch(`/stalker/channels?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       const items = (data.channels || []).map(transformStalkerItem);
@@ -1690,7 +1697,7 @@ export default function App() {
     if (!cats) {
       if (!background) setLoading(true);
       try {
-        const res  = await fetch(`${PROXY}/stalker/${sec}/categories?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+        const res  = await stalkerFetch(`/stalker/${sec}/categories?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         cats = data.categories || [];
@@ -1738,7 +1745,7 @@ export default function App() {
     }
     if (!silent) setCatLoading(true);
     try {
-      const res  = await fetch(`${PROXY}/stalker/${sec}?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cat=${catId}`);
+      const res  = await stalkerFetch(`/stalker/${sec}?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cat=${catId}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       const items = data.items || [];
@@ -1843,7 +1850,7 @@ export default function App() {
     if (!conn || conn.type !== "stalker") return;
     setEpgLoading(true);
     try {
-      const res = await fetch(`${PROXY}/stalker/epg?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&period=4`);
+      const res = await stalkerFetch(`/stalker/epg?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&period=4`);
       const data = await res.json();
       if (data.programs) setEpgData(data.programs);
     } catch(e) { console.error("Stalker EPG error:", e); }
@@ -1919,7 +1926,7 @@ export default function App() {
 
     try {
       if (conn?.type === "stalker") {
-        const res = await fetch(`${PROXY}/stalker/series/seasons?seriesId=${encodeURIComponent(item.id)}&portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+        const res = await stalkerFetch(`/stalker/series/seasons?seriesId=${encodeURIComponent(item.id)}&portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const seasons = data.seasons || [];
