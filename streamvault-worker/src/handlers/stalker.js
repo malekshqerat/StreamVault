@@ -2,6 +2,17 @@
 import { jsonResponse, errorResponse } from "../utils/cors.js";
 import { getSession, portalFetchRetry, fetchAllPages } from "../utils/stalker.js";
 
+// Some portals return stream URLs with "localhost" — replace with portal hostname
+function fixLocalhost(streamUrl, portal) {
+  if (!streamUrl.includes("localhost") && !streamUrl.includes("127.0.0.1")) return streamUrl;
+  try {
+    const portalHost = new URL(portal).host;
+    return streamUrl
+      .replace(/localhost(:\d+)?/g, portalHost)
+      .replace(/127\.0\.0\.1(:\d+)?/g, portalHost);
+  } catch { return streamUrl; }
+}
+
 // POST /stalker/handshake
 export async function handleHandshake(request, env) {
   const { portal, mac, serial } = await request.json();
@@ -201,7 +212,7 @@ export async function handleStalkerStream(url, env) {
     const streamUrl = data?.js?.cmd;
     if (!streamUrl) throw new Error("No stream URL returned");
 
-    const cleanUrl = streamUrl.replace(/^ffmpeg\s+/, "").trim();
+    const cleanUrl = fixLocalhost(streamUrl.replace(/^ffmpeg\s+/, "").trim(), portal);
     return jsonResponse({ url: cleanUrl });
   } catch (e) {
     return errorResponse(e.message);
@@ -234,7 +245,7 @@ export async function handleEpisodeStream(url, env) {
     const streamUrl = data?.js?.cmd;
     if (!streamUrl) throw new Error("No stream URL returned for episode");
 
-    const cleanUrl = streamUrl.replace(/^ffmpeg\s+/, "").trim();
+    const cleanUrl = fixLocalhost(streamUrl.replace(/^ffmpeg\s+/, "").trim(), portal);
     return jsonResponse({ url: cleanUrl });
   } catch (e) {
     return errorResponse(e.message);
@@ -348,7 +359,7 @@ export async function handleStalkerPlay(url, env) {
     const streamUrl = data?.js?.cmd;
     if (!streamUrl) throw new Error("No stream URL returned");
 
-    const cleanUrl = streamUrl.replace(/^ffmpeg\s+/, "").trim();
+    const cleanUrl = fixLocalhost(streamUrl.replace(/^ffmpeg\s+/, "").trim(), portal);
 
     // Fetch the stream in the SAME Worker invocation (same outbound IP as create_link)
     const upstream = await fetch(cleanUrl, {

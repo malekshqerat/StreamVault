@@ -1,6 +1,6 @@
 // StreamVault CF Worker — main router
 // Replaces stalker-proxy + existing CF Pages worker
-import { jsonResponse, handleOptions } from "./utils/cors.js";
+import { jsonResponse, errorResponse, handleOptions } from "./utils/cors.js";
 import {
   handleHandshake, handleChannels, handleVodCategories, handleVod,
   handleSeriesCategories, handleSeries, handleSeriesSeasons,
@@ -29,6 +29,15 @@ export default {
 
     // CORS preflight for all routes
     if (method === "OPTIONS") return handleOptions();
+
+    try {
+    return await this._route(request, env, ctx, url, pathname, method);
+    } catch (e) {
+      return errorResponse(e.message || "Internal server error", 500);
+    }
+  },
+
+  async _route(request, env, ctx, url, pathname, method) {
 
     // Track daily request count (fire-and-forget, non-blocking)
     const today = new Date().toISOString().slice(0, 10);

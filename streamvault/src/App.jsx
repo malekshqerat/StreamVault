@@ -112,7 +112,9 @@ function syncCategoriesToD1(connectionId, section, categories) {
 }
 
 function syncConnectionToD1(id, type, config) {
-  catalogAPI("connections", { method: "PUT", body: { id, type, config } });
+  // Strip large arrays (channels, etc.) — content is synced separately via syncContentToD1
+  const { channels, ...light } = config;
+  catalogAPI("connections", { method: "PUT", body: { id, type, config: light } });
 }
 
 function syncFavoritesToD1(connectionId, favorites) {
@@ -231,8 +233,11 @@ function fmtTime(sec) {
   return h > 0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
 }
 
-function proxyFetch(url) {
-  return fetch(`${PROXY}/proxy?url=${encodeURIComponent(url)}`);
+async function proxyFetch(url) {
+  const path = `/proxy?url=${encodeURIComponent(url)}`;
+  let res = await fetch(`${CATALOG_API}${path}`).catch(() => null);
+  if (!res?.ok) res = await fetch(`${PROXY}${path}`);
+  return res;
 }
 
 function makeXtreamAPI(server, user, pass) {
@@ -631,8 +636,10 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
   const [streamErr, setStreamErr] = useState(null);
 
   const isMixed = location.protocol === "https:" ? (u) => u?.startsWith("http://") : () => false;
+  // External IPTV servers don't send CORS headers — always proxy M3U/Xtream streams
+  const needsProxy = (u) => isMixed(u) || ((connType === "m3u" || connType === "xtream") && u && !u.startsWith(PROXY) && !u.startsWith(STREAM_PROXY) && !u.startsWith(CATALOG_API));
   // Proxy streams through STREAM_PROXY (may differ from API proxy) — skip if already proxied
-  const streamProxy = (u) => (u?.startsWith(PROXY) || u?.startsWith(STREAM_PROXY)) ? u : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
+  const streamProxy = (u) => (u?.startsWith(PROXY) || u?.startsWith(STREAM_PROXY) || u?.startsWith(CATALOG_API)) ? u : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
 
   function initPlayer(url) {
     const video = videoRef.current;
@@ -641,12 +648,21 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     destroyPlayers();
     video.removeAttribute("src");
 
+    // Native <video> error handler (for direct src= playback)
+    video.onerror = () => {
+      // Skip if HLS.js or mpegts.js is handling (they have their own error handlers)
+      if (hlsRef.current || mpegtsRef.current) return;
+      const e = video.error;
+      const msgs = { 1: "Playback aborted", 2: "Network error — could not load stream", 3: "Decode error — stream format not supported", 4: "Source not supported — the stream format or URL is invalid" };
+      setStreamErr({ icon: "⚠️", title: "Playback Error", body: msgs[e?.code] || "Unknown video error" });
+    };
+
     function startHls(u) {
       if (window.Hls?.isSupported()) {
         const opts = { enableWorker: false, fragLoadingMaxRetry: 2 };
         // On HTTPS pages, proxy HTTP streams through proxy
         // The proxy rewrites HLS manifests so segments also go through proxy (same IP)
-        if (isMixed(u)) {
+        if (needsProxy(u)) {
           u = streamProxy(u);
         }
         const hls = new window.Hls(opts);
@@ -678,19 +694,44 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
           destroyPlayers();
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = isMixed(u) ? streamProxy(u) : u; video.play().catch(()=>{});
+        video.src = needsProxy(u) ? streamProxy(u) : u; video.play().catch(()=>{});
       }
     }
 
     function startMpegts(u) {
       // Proxy HTTP streams through Cloudflare Worker when on HTTPS
-      if (isMixed(u)) u = streamProxy(u);
+      if (needsProxy(u)) u = streamProxy(u);
       if (!window.mpegts?.isSupported()) {
         video.src = u; video.play().catch(()=>{}); return;
       }
       const player = window.mpegts.createPlayer({ type: "mpegts", isLive: true, url: u },
         { enableWorker: false, lazyLoadMaxDuration: 3 * 60, seekType: "range" });
       mpegtsRef.current = player;
+      player.on(window.mpegts.Events.ERROR, (errType, errDetail, errInfo) => {
+        const code = errInfo?.code;
+        let title = "Playback Error";
+        let body;
+        if (code === 404) {
+          title = "Stream Not Found (404)";
+          body = "The stream URL returned 404. The channel may be offline or the URL has changed.";
+        } else if (code === 403) {
+          title = "Access Denied (403)";
+          body = "The stream server rejected the request. Your credentials may not have access.";
+        } else if (code >= 400 && code < 500) {
+          title = `Client Error (${code})`;
+          body = `The stream request was rejected with HTTP ${code}.`;
+        } else if (code >= 500) {
+          title = `Server Error (${code})`;
+          body = "The stream server returned an error. It may be overloaded or temporarily down.";
+        } else if (errType === "NetworkError") {
+          title = "Network Error";
+          body = `Could not load the stream. ${errInfo?.msg || "Check your connection or try again."}`;
+        } else {
+          body = `${errType}: ${errDetail || "Unknown error"}${code ? ` (HTTP ${code})` : ""}`;
+        }
+        setStreamErr({ icon: "⚠️", title, body });
+        destroyPlayers();
+      });
       player.attachMediaElement(video);
       player.load();
       player.play().catch(()=>{});
@@ -725,8 +766,15 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
                         () => startHls(url));
       } else {
         // Direct video file — proxy if needed for mixed content, let <video> handle it
-        video.src = isMixed(url) ? streamProxy(url) : url; video.play().catch(()=>{});
+        video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
       }
+      return;
+    }
+
+    // Direct video files (MP4, MKV, AVI, etc.) — play natively, not via mpegts/HLS
+    const fileExt = url.split(/[?#]/)[0].split(".").pop()?.toLowerCase();
+    if (["mp4", "mkv", "avi", "mov", "webm", "mp3", "aac"].includes(fileExt)) {
+      video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
       return;
     }
 
@@ -736,7 +784,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
 
     // For Xtream live streams on HTTPS, proxy raw TS through stream proxy
     // (HLS .m3u8 has IP-bound segment tokens that break with proxied manifests)
-    if (needTs && isMixed(url)) {
+    if (needTs && needsProxy(url)) {
       const proxied = streamProxy(url);
       if (window.mpegts) startMpegts(proxied);
       else loadScript("https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js",
@@ -753,7 +801,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
       else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
                       () => startHls(url));
     } else {
-      video.src = isMixed(url) ? streamProxy(url) : url; video.play().catch(()=>{});
+      video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
     }
   }
 
@@ -1807,18 +1855,20 @@ export default function App() {
     try {
       const playUrl = stalkerPlayUrl(cmd, contentType);
       const res = await fetch(playUrl);
-      const ct = res.headers.get("content-type") || "";
-      if (ct.includes("json")) {
-        const data = await res.json();
-        if (data.url) {
-          const u = data.url;
-          return (u.startsWith(PROXY) || u.startsWith(STREAM_PROXY) || u.startsWith(CATALOG_API)) ? u
-            : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
+      if (res.ok) {
+        const ct = res.headers.get("content-type") || "";
+        if (ct.includes("json")) {
+          const data = await res.json();
+          if (data.url) {
+            const u = data.url;
+            return (u.startsWith(PROXY) || u.startsWith(STREAM_PROXY) || u.startsWith(CATALOG_API)) ? u
+              : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
+          }
+          if (data.error) console.warn("CF Worker play error:", data.error);
+          else return playUrl; // Worker streamed directly
+        } else {
+          return playUrl; // Worker streamed directly (non-JSON = stream body)
         }
-        // data.error means CF Worker couldn't reach portal (portal blocks CF IPs) — fall through to Koyeb
-        if (!data.error) return playUrl; // Worker streamed directly
-      } else {
-        return playUrl; // Worker streamed directly (non-JSON = stream body)
       }
     } catch(e) { console.warn("CF Worker stalker play failed, trying Koyeb:", e.message); }
 

@@ -10,7 +10,7 @@ app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
 }));
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 // ── Cache: path resolution cached long-term, tokens are never cached (portals invalidate on re-handshake)
 const pathCache = new Map();
@@ -353,7 +353,14 @@ app.get("/stalker/stream", async (req, res) => {
     const streamUrl = data?.js?.cmd;
     if (!streamUrl) throw new Error("No stream URL returned");
 
-    const cleanUrl = streamUrl.replace(/^ffmpeg\s+/, "").trim();
+    let cleanUrl = streamUrl.replace(/^ffmpeg\s+/, "").trim();
+    // Some portals return localhost URLs — replace with portal hostname
+    if (cleanUrl.includes("localhost") || cleanUrl.includes("127.0.0.1")) {
+      try {
+        const portalHost = new URL(portal).host;
+        cleanUrl = cleanUrl.replace(/localhost(:\d+)?/g, portalHost).replace(/127\.0\.0\.1(:\d+)?/g, portalHost);
+      } catch {}
+    }
     res.json({ url: cleanUrl });
   } catch (e) {
     console.error("Stream resolve error:", e.message);
