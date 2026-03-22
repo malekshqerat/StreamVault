@@ -989,10 +989,10 @@ function Setup({ onConnect, connections = [], onReconnect }) {
       } else if (type === "stalker") {
         if (!f.server||!f.mac) throw new Error("Portal URL and MAC required");
         const server = f.server.trim().replace(/\/$/,"");
-        const hs = await fetch(`${PROXY}/stalker/handshake`, {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ portal: server, mac: f.mac.trim(), serial:f.serial?.trim()||undefined, deviceId:f.deviceId?.trim()||undefined, deviceId2:(f.deviceId2?.trim()||f.deviceId?.trim())||undefined })
-        });
+        const hsBody = JSON.stringify({ portal: server, mac: f.mac.trim(), serial:f.serial?.trim()||undefined, deviceId:f.deviceId?.trim()||undefined, deviceId2:(f.deviceId2?.trim()||f.deviceId?.trim())||undefined });
+        // Try CF Worker first (always-open CORS), fall back to Koyeb
+        let hs = await fetch(`${CATALOG_API}/stalker/handshake`, { method:"POST", headers:{"Content-Type":"application/json"}, body: hsBody }).catch(()=>null);
+        if (!hs?.ok) hs = await fetch(`${PROXY}/stalker/handshake`, { method:"POST", headers:{"Content-Type":"application/json"}, body: hsBody });
         const hsData = await hs.json();
         if (!hs.ok || hsData.error) throw new Error(hsData.error || "Stalker handshake failed");
         // Connection saved by handleConnect in App
