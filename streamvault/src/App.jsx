@@ -743,20 +743,14 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
       s.src = src; s.onload = cb; document.head.appendChild(s);
     }
 
-    // Detect Xtream VOD URLs: /movie/user/pass/id.ext (should use HLS, not mpegts)
-    const xtreamVodMatch = url.match(/^(https?:\/\/[^/]+\/)movie\/([^/]+\/[^/]+\/\d+)\.\w+$/);
-    if (xtreamVodMatch) {
-      // Rewrite VOD URL to .m3u8 — Xtream servers support HLS for VOD
-      const hlsUrl = xtreamVodMatch[1] + "movie/" + xtreamVodMatch[2] + ".m3u8";
-      if (window.Hls) startHls(hlsUrl);
-      else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
-                      () => startHls(hlsUrl));
+    // Direct video files (MP4, MKV, AVI, etc.) — play natively, not via mpegts/HLS
+    const fileExt = url.split(/[?#]/)[0].split(".").pop()?.toLowerCase();
+    if (["mp4", "mkv", "avi", "mov", "webm", "mp3", "aac"].includes(fileExt)) {
+      video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
       return;
     }
 
-    // Stalker VOD/series items are direct video files (MKV, MP4, etc.) served by the portal.
-    // They should NOT use mpegts.js (which is for live TS streams). Play them via the
-    // <video> element directly, or via HLS if the URL ends in .m3u8.
+    // Stalker VOD/series items are direct video files served by the portal.
     const isStalkerVod = (current.type === "vod" || current.type === "series")
       && (url.includes("/play/movie.php") || url.includes("/play/live.php") || url.includes("play_token="));
     if (isStalkerVod) {
@@ -765,16 +759,8 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
         else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
                         () => startHls(url));
       } else {
-        // Direct video file — proxy if needed for mixed content, let <video> handle it
         video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
       }
-      return;
-    }
-
-    // Direct video files (MP4, MKV, AVI, etc.) — play natively, not via mpegts/HLS
-    const fileExt = url.split(/[?#]/)[0].split(".").pop()?.toLowerCase();
-    if (["mp4", "mkv", "avi", "mov", "webm", "mp3", "aac"].includes(fileExt)) {
-      video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
       return;
     }
 
