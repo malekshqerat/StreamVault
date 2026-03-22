@@ -1792,26 +1792,38 @@ export default function App() {
   }
 
   async function resolveStalkerStream(item) {
+    const contentType = item.type || "live";
+    const cmd = item._stalkerCmd;
+
+    // Step 1: Try CF Worker /stalker/play — resolves create_link + streams in same invocation (same IP)
+    // Some portals work fine with CF Worker IPs; this avoids using Koyeb bandwidth entirely.
     try {
-      const contentType = item.type || "live";
-      const playUrl = stalkerPlayUrl(item._stalkerCmd, contentType);
-      // Try /stalker/play — if Worker can stream directly, use the play URL
-      // If it returns JSON with fallback:true, the Worker couldn't stream (CF-to-CF block etc)
-      // In that case, route through Koyeb /stream proxy (stable connection to portal)
+      const playUrl = stalkerPlayUrl(cmd, contentType);
       const res = await fetch(playUrl);
       const ct = res.headers.get("content-type") || "";
       if (ct.includes("json")) {
         const data = await res.json();
         if (data.url) {
           const u = data.url;
-          // Use Koyeb for stalker stream fallback (CF Worker gets 462 from portals)
-          return (u.startsWith(PROXY) || u.startsWith(STREAM_PROXY) || u.startsWith(CATALOG_API)) ? u : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
+          return (u.startsWith(PROXY) || u.startsWith(STREAM_PROXY) || u.startsWith(CATALOG_API)) ? u
+            : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
         }
-        if (data.error) throw new Error(data.error);
+        // data.error means CF Worker couldn't reach portal (portal blocks CF IPs) — fall through to Koyeb
+        if (!data.error) return playUrl; // Worker streamed directly
+      } else {
+        return playUrl; // Worker streamed directly (non-JSON = stream body)
       }
-      // Worker streamed successfully — use the play URL directly
-      return playUrl;
-    } catch(e) { console.error("Stream resolve error:", e); return null; }
+    } catch(e) { console.warn("CF Worker stalker play failed, trying Koyeb:", e.message); }
+
+    // Step 2: Fall back to Koyeb /stalker/stream — stable non-datacenter IP, portal more likely to allow
+    try {
+      const koRes = await fetch(
+        `${PROXY}/stalker/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(cmd)}&content_type=${encodeURIComponent(contentType)}`
+      );
+      const koData = await koRes.json();
+      if (koData.url) return `${STREAM_PROXY}/stream?url=${encodeURIComponent(koData.url)}`;
+      throw new Error(koData.error || "No stream URL from Koyeb");
+    } catch(e) { console.error("Stalker stream resolve failed:", e); return null; }
   }
 
   async function loadEPG(url) {
@@ -1941,14 +1953,22 @@ export default function App() {
     setEpisodeLoading(episodeNum);
     try {
       if (conn?.type === "stalker") {
-        // Resolve via /stalker/play — handles both direct streaming and fallback
-        const playUrl = stalkerPlayUrl(season.cmd, "series", episodeNum);
-        const res = await fetch(playUrl);
-        const ct = res.headers.get("content-type") || "";
-        let resolvedUrl = playUrl;
-        if (ct.includes("json")) {
-          const data = await res.json();
-          if (data.url) resolvedUrl = (data.url.startsWith(PROXY) || data.url.startsWith(STREAM_PROXY) || data.url.startsWith(CATALOG_API)) ? data.url : `${STREAM_PROXY}/stream?url=${encodeURIComponent(data.url)}`;
+        // Resolve series episode stream — try CF Worker first, fall back to Koyeb
+        let resolvedUrl = null;
+        try {
+          const playUrl = stalkerPlayUrl(season.cmd, "series", episodeNum);
+          const res = await fetch(playUrl);
+          const ct = res.headers.get("content-type") || "";
+          if (ct.includes("json")) {
+            const data = await res.json();
+            if (data.url) resolvedUrl = (data.url.startsWith(PROXY) || data.url.startsWith(STREAM_PROXY) || data.url.startsWith(CATALOG_API)) ? data.url : `${STREAM_PROXY}/stream?url=${encodeURIComponent(data.url)}`;
+            else if (!data.error) resolvedUrl = playUrl;
+          } else { resolvedUrl = playUrl; }
+        } catch(e) { console.warn("CF Worker episode play failed, trying Koyeb:", e.message); }
+        if (!resolvedUrl) {
+          const koRes = await fetch(`${PROXY}/stalker/series/episode/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(season.cmd)}&episode=${episodeNum}`);
+          const koData = await koRes.json();
+          if (koData.url) resolvedUrl = `${STREAM_PROXY}/stream?url=${encodeURIComponent(koData.url)}`;
         }
         const epItem = {
           id: `${seriesDetail.item.id}-s${seriesDetail.activeSeason}-e${episodeNum}`,
