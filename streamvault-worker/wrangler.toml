@@ -3,15 +3,17 @@ main = "src/index.js"
 compatibility_date = "2024-12-01"
 
 # KV namespace for Stalker session/path caching
+# Create with: wrangler kv namespace create SV_CACHE
 [[kv_namespaces]]
 binding = "SV_CACHE"
-id = "852bb8a28504423e867886eac35fde3e"
+id = ""  # Set your KV namespace ID here
 
 # D1 database for persistent content storage
+# Create with: wrangler d1 create streamvault-db
 [[d1_databases]]
 binding = "SV_DB"
 database_name = "streamvault-db"
-database_id = "aa169664-7ce3-45f1-b1f1-ff4cdcfa292f"
+database_id = ""  # Set your D1 database ID here
 migrations_dir = "migrations"
 
 # Daily cleanup: purge data for guests inactive > 7 days (runs at 3am UTC)

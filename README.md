@@ -17,7 +17,7 @@ Supports **Xtream Codes**, **M3U playlists**, **Stalker/Ministra portals**, and 
 | Favorites | Per-profile favorites across all content types |
 | Continue Watching | Watch history with resume support (last 60 items) |
 | Themes | Dark · Navy · AMOLED · Forest |
-| Player | HLS.js, keyboard shortcuts, Picture-in-Picture, OSD, quick channel switcher |
+| Player | HLS.js, mpegts.js, keyboard shortcuts, Picture-in-Picture, OSD, quick channel switcher |
 
 **Keyboard shortcuts in player:**
 `Space` play/pause · `F` fullscreen · `M` mute · `←→` channels / ±10s · `↑↓` channels / volume · `P` PiP · `Esc` close
@@ -28,12 +28,16 @@ Supports **Xtream Codes**, **M3U playlists**, **Stalker/Ministra portals**, and 
 
 ```
 StreamVault/
-├── streamvault/        # React + Vite frontend
-│   ├── src/App.jsx     # Entire app (single-file architecture)
+├── streamvault/           # React + Vite frontend
+│   ├── src/App.jsx        # Entire app (single-file architecture)
 │   └── .env.example
-└── stalker-proxy/      # Node.js CORS proxy for Stalker portals
-    ├── src/index.js
-    └── .env.example
+├── stalker-proxy/         # Node.js CORS proxy for Stalker portals
+│   ├── src/index.js
+│   └── .env.example
+└── streamvault-worker/    # Cloudflare Worker (optional)
+    ├── src/               # Stalker proxy, stream proxy, catalog API
+    ├── migrations/        # D1 database schema
+    └── wrangler.toml
 ```
 
 ---
@@ -43,7 +47,7 @@ StreamVault/
 ### 1. Clone
 
 ```bash
-git clone https://github.com/your-username/StreamVault.git
+git clone https://github.com/YOUR-USERNAME/StreamVault.git
 cd StreamVault
 ```
 
@@ -87,6 +91,12 @@ Go to `http://localhost:5173` and choose your connection type:
 ```env
 # URL of the stalker-proxy (local or deployed)
 VITE_PROXY_URL=http://localhost:3001
+
+# Optional: CF Worker URL for catalog API
+# VITE_CATALOG_URL=https://your-worker.workers.dev
+
+# Optional: Separate stream proxy URL
+# VITE_STREAM_PROXY_URL=https://your-proxy.koyeb.app
 ```
 
 ### `stalker-proxy/.env`
@@ -109,50 +119,61 @@ npm run build
 
 ---
 
-## Deploying (free)
+## Deploying (free tier)
 
-### Step 1 — Deploy the proxy to Koyeb
+### Option A — Proxy only (Koyeb)
 
 1. Go to [koyeb.com](https://koyeb.com) → **Create App**
-2. Choose **GitHub** → select `frossty/StreamVault`
+2. Choose **GitHub** → select your StreamVault fork
 3. Set **Work directory** to `stalker-proxy`
 4. Build command: `npm install` · Run command: `npm start`
-5. Add env var: `ALLOWED_ORIGIN` → `*` *(lock down after step 2)*
-6. Deploy — **Proxy is live at `https://institutional-sacha-streamvault-9dcb405f.koyeb.app`**
+5. Add env var: `ALLOWED_ORIGIN` → `*` *(lock down after deploying frontend)*
+6. Deploy — note the Koyeb URL
 
 > `koyeb.yaml` in `stalker-proxy/` pre-fills most of these settings.
 
----
-
-### Step 2 — Deploy the frontend to Cloudflare Pages
+### Option B — Frontend (Cloudflare Pages)
 
 1. Go to [pages.cloudflare.com](https://pages.cloudflare.com) → **Create a project** → **Connect to Git**
-2. Select `frossty/StreamVault`
+2. Select your StreamVault fork
 3. Set **Root directory** to `streamvault`
 4. Build command: `npm run build` · Build output directory: `dist`
-5. Add env var: `VITE_PROXY_URL` → `https://institutional-sacha-streamvault-9dcb405f.koyeb.app`
-6. Deploy — **Frontend is live at `https://streamvault.lookin2share.workers.dev`**
+5. Add env var: `VITE_PROXY_URL` → your Koyeb proxy URL from step A
+6. Deploy
 
----
+### Option C — Cloudflare Worker (optional, replaces proxy)
 
-### Step 3 — Lock down CORS
+The CF Worker provides the same proxy functionality plus persistent storage (D1) and KV caching:
 
-Once you have the Pages URL, go back to **Koyeb → Environment** and set:
+```bash
+cd streamvault-worker
+# Create KV namespace and D1 database
+wrangler kv namespace create SV_CACHE
+wrangler d1 create streamvault-db
 
+# Update wrangler.toml with the returned IDs
+# Run migrations
+wrangler d1 migrations apply streamvault-db
+
+# Deploy
+wrangler deploy
 ```
-ALLOWED_ORIGIN=https://streamvault.lookin2share.workers.dev
-```
 
-Every `git push` to `main` auto-deploys both services.
+Then set `VITE_CATALOG_URL` in your frontend env to the Worker URL.
+
+### Lock down CORS
+
+Once deployed, set `ALLOWED_ORIGIN` on Koyeb to your frontend URL.
 
 ---
 
 ## Tech stack
 
-- **Frontend** — React 19, Vite 8, HLS.js (lazy-loaded)
+- **Frontend** — React 19, Vite 8, HLS.js, mpegts.js (lazy-loaded)
 - **Proxy** — Node.js 18+, Express, node-fetch
+- **Worker** — Cloudflare Workers, D1, KV
 - **Styling** — CSS-in-JS via template literal, injected as `<style>` tag (no build-time CSS)
-- **Storage** — `localStorage` (browser) with `window.storage` fallback (custom runtimes)
+- **Storage** — IndexedDB (browser), D1 (cloud sync)
 
 ---
 

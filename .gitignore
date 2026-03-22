@@ -12,7 +12,15 @@ build/
 .env
 .env.local
 .env.*.local
+.env.poc
 !.env.example
+
+# ── Wrangler / Cloudflare ────────────────────────────────────────
+.wrangler/
+wrangler.local.toml
+
+# ── Claude Code ──────────────────────────────────────────────────
+.claude/
 
 # ── Logs ──────────────────────────────────────────────────────────
 logs/
