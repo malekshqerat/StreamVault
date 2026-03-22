@@ -1,16 +1,35 @@
-# React + Vite
+# StreamVault Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React SPA built with Vite. The entire app lives in a single file (`src/App.jsx`).
 
-Currently, two official plugins are available:
+## Setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+cp .env.example .env
+npm install
+npm run dev
+# Opens at http://localhost:5173
+```
 
-## React Compiler
+## Build
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm run build
+# Output: dist/
+```
 
-## Expanding the ESLint configuration
+## Environment
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VITE_PROXY_URL` | `http://localhost:3001` | Backend proxy URL |
+| `VITE_CATALOG_URL` | same as PROXY | CF Worker catalog API (optional) |
+| `VITE_STREAM_PROXY_URL` | same as PROXY | Stream proxy URL (optional) |
+
+## Deploy to Cloudflare Pages
+
+1. Connect your GitHub repo
+2. Root directory: `streamvault`
+3. Build command: `npm run build`
+4. Build output: `dist`
+5. Add env vars as needed

@@ -1,7 +1,6 @@
 # Stalker Proxy
 
-A lightweight Node.js proxy that handles the Stalker/Ministra portal handshake and
-CORS so StreamVault can talk to your IPTV provider's portal from a browser.
+A lightweight Node.js proxy that handles Stalker/Ministra portal authentication and CORS so StreamVault can talk to IPTV portals from a browser.
 
 ## Why is this needed?
 
@@ -14,80 +13,48 @@ This proxy handles all three transparently.
 
 ## Setup
 
-### 1. Install dependencies
-
-```bash
-npm install
-```
-
-### 2. Configure environment
-
 ```bash
 cp .env.example .env
-# Edit .env if needed — defaults work for local dev
-```
-
-### 3. Run locally
-
-```bash
+npm install
 npm start
-# or for auto-reload during development:
-npm run dev
+# Runs at http://localhost:3001
 ```
 
-Proxy runs at: `http://localhost:3001`
+## API
 
----
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/stalker/handshake` | POST | Token handshake `{ portal, mac }` → `{ token }` |
+| `/stalker/channels` | GET | All channels with genres merged |
+| `/stalker/vod/categories` | GET | VOD category list |
+| `/stalker/vod` | GET | VOD items by category |
+| `/stalker/series/categories` | GET | Series category list |
+| `/stalker/series` | GET | Series items by category |
+| `/stalker/series/seasons` | GET | Seasons and episodes |
+| `/stalker/stream` | GET | Resolve `cmd` to stream URL |
+| `/stalker/epg` | GET | EPG program data |
+| `/stalker/api` | GET | Generic portal API passthrough |
+| `/stream` | GET | HTTP stream proxy with HLS rewriting |
+| `/proxy` | GET | Generic CORS proxy |
+| `/health` | GET | Health check |
 
-## API Endpoints
+## Deploy
 
-### `GET /health`
-Check the proxy is alive.
+### Koyeb (recommended)
 
-### `POST /stalker/handshake`
-```json
-{ "portal": "http://your-portal.com/c", "mac": "00:1A:79:XX:XX:XX" }
-```
-Returns: `{ "token": "abc123..." }`
+`koyeb.yaml` is pre-configured. Set `ALLOWED_ORIGIN` to your frontend URL.
 
-### `GET /stalker/channels?portal=...&mac=...`
-Fetches all live channels with genre names merged in.
-Returns: `{ "channels": [...], "total": 287 }`
+### Railway
 
-### `GET /stalker/vod?portal=...&mac=...&page=1`
-Fetches VOD items (paginated).
+`railway.json` is pre-configured. Add env var `ALLOWED_ORIGIN`.
 
-### `GET /stalker/stream?portal=...&mac=...&cmd=...`
-Resolves a Stalker stream `cmd` to a playable HLS/RTSP URL.
-Returns: `{ "url": "http://..." }`
+### Render
 
-### `GET /stalker/api?portal=...&mac=...&type=...&action=...`
-Generic passthrough — any Stalker portal API call.
+Build: `npm install` · Start: `npm start` · Free tier works.
 
----
+## Environment
 
-## Deploy free on Railway
-
-1. Push this folder to a GitHub repo
-2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
-3. Select the repo — Railway auto-detects Node.js
-4. Set env var `ALLOWED_ORIGIN` to your StreamVault URL
-5. Done — you get a URL like `https://stalker-proxy-production.up.railway.app`
-
-## Deploy free on Render
-
-1. Push to GitHub
-2. Go to [render.com](https://render.com) → New Web Service
-3. Connect repo, set Build Command: `npm install`, Start Command: `npm start`
-4. Free tier is enough for personal use
-
----
-
-## StreamVault integration
-
-In StreamVault, when connecting via Stalker Portal, enter:
-- **Proxy URL**: `http://localhost:3001` (or your deployed URL)
-- **Portal URL**: your provider's portal URL  
-- **MAC Address**: your registered MAC
-
-The proxy URL field is shown in the Stalker tab of the connection screen.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3001` | Server port |
+| `ALLOWED_ORIGIN` | `*` | CORS origin — lock down in production |
