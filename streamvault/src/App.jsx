@@ -1,6 +1,15 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 const PROXY = import.meta.env.VITE_PROXY_URL || "http://localhost:3001";
+const STREAM_PROXY = import.meta.env.VITE_STREAM_PROXY_URL || PROXY;
+const CATALOG_API = import.meta.env.VITE_CATALOG_URL || PROXY;
+
+// Try CF Worker first (always-open CORS), fall back to Koyeb
+async function stalkerFetch(path) {
+  let res = await fetch(`${CATALOG_API}${path}`).catch(() => null);
+  if (!res?.ok) res = await fetch(`${PROXY}${path}`);
+  return res;
+}
 
 // ══════════════════════════════════════════════════════════════════
 // THEMES (OTT Navigator style multi-theme)
@@ -10,6 +19,8 @@ const THEMES = {
   Navy:   { bg:"#030b1a", s1:"#061228", s2:"#0d1f3c", s3:"#152850", accent:"#4da6ff", accent2:"#6c63ff", t1:"#d0e8ff", t2:"#6090b8", t3:"#304560" },
   AMOLED: { bg:"#000000", s1:"#0d0d0d", s2:"#181818", s3:"#222222", accent:"#ff6b35", accent2:"#ff2d55", t1:"#f0f0f0", t2:"#888888", t3:"#444444" },
   Forest: { bg:"#050f0a", s1:"#0a1f14", s2:"#112a1c", s3:"#1a3828", accent:"#00e896", accent2:"#00b4d8", t1:"#d0ffe8", t2:"#5a9070", t3:"#2a5038" },
+  White:  { bg:"#ffffff", s1:"#f5f5f7", s2:"#ebebef", s3:"#dddde3", accent:"#0066ff", accent2:"#7c3aed", t1:"#1a1a2e", t2:"#5a5a72", t3:"#9a9ab0" },
+  Bright: { bg:"#f8f9fc", s1:"#eef0f6", s2:"#e2e5ee", s3:"#d5d8e3", accent:"#e8364f", accent2:"#ff8c00", t1:"#1c1c28", t2:"#555568", t3:"#8888a0" },
 };
 const THEME_NAMES = Object.keys(THEMES);
 const PROFILE_COLORS = ["#00d4ff","#ff6b35","#00e896","#ff2d55","#a78bfa","#fbbf24"];
@@ -24,22 +35,9 @@ function getGuestId() {
 }
 const GUEST_ID = getGuestId();
 
-let _syncTimer = null;
-function scheduleCloudSync() {
-  clearTimeout(_syncTimer);
-  _syncTimer = setTimeout(async () => {
-    try {
-      const keys = ["sv-theme","sv-profiles","sv-activeProfile","sv-history","sv-hiddenCats","sv-epgURL","sv-lastConn"];
-      const data = {};
-      for (const k of keys) { const v = localStorage.getItem(k); if (v !== null) data[k] = JSON.parse(v); }
-      // Also save per-profile favorites
-      const profiles = data["sv-profiles"] || [];
-      for (const p of profiles) { const fk = `sv-favs-${p.id}`; const v = localStorage.getItem(fk); if (v !== null) data[fk] = JSON.parse(v); }
-      await fetch("/api/session", { method: "POST", headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ guestId: GUEST_ID, data }) }).catch(() => {});
-    } catch {}
-  }, 5000);
-}
+// Cloud sync is handled by per-connection D1 catalog API (syncContentToD1, etc.)
+// Legacy session sync disabled — no /api/session endpoint on CF Worker
+function scheduleCloudSync() {}
 
 const db = {
   async get(key, fallback = null) {
@@ -82,17 +80,94 @@ const idbCache = (() => {
   };
 })();
 
-// On first load, try to restore from cloud if localStorage is empty
-(async () => {
+// Deterministic connection ID for IDB/D1 keying
+function connId(c) {
+  if (!c) return null;
+  if (c.type === "stalker") return `stalker:${c.server}:${c.mac}`;
+  if (c.type === "xtream") return `xtream:${c.server}:${c.user}`;
+  if (c.type === "m3u") return `m3u:${c.url}`;
+  return "hls";
+}
+
+// D1 catalog API helper (fire-and-forget background sync)
+function catalogAPI(path, opts = {}) {
+  const { method = "GET", body } = opts;
+  const headers = { "X-Guest-Id": GUEST_ID };
+  if (body) headers["Content-Type"] = "application/json";
+  return fetch(`${CATALOG_API}/api/catalog/${path}`, {
+    method, headers, body: body ? JSON.stringify(body) : undefined,
+  }).then(r => r.json()).catch(() => null);
+}
+
+function syncContentToD1(connectionId, type, items) {
+  catalogAPI("content", { method: "PUT", body: { connectionId, type, items: items.map(i => ({
+    id: i.id, name: i.name, logo: i.logo, group: i.group, url: i.url,
+    num: i.num, epgId: i.epgId, year: i.year, rating: i.rating,
+    stalkerCmd: i._stalkerCmd || i.stalkerCmd,
+  })) } });
+}
+
+function syncCategoriesToD1(connectionId, section, categories) {
+  catalogAPI("categories", { method: "PUT", body: { connectionId, section, categories } });
+}
+
+function syncConnectionToD1(id, type, config) {
+  // Strip large arrays (channels, etc.) — content is synced separately via syncContentToD1
+  const { channels, ...light } = config;
+  catalogAPI("connections", { method: "PUT", body: { id, type, config: light } });
+}
+
+function syncFavoritesToD1(connectionId, favorites) {
+  catalogAPI("favorites", { method: "PUT", body: { profileId: connectionId, favorites } });
+}
+
+function syncHistoryToD1(history) {
+  catalogAPI("history", { method: "PUT", body: { history } });
+}
+
+function syncPreferencesToD1(prefs) {
+  catalogAPI("preferences", { method: "PUT", body: { preferences: prefs } });
+}
+
+// Migrate old idbCache/localStorage data to new permanent IDB keys
+async function migrateOldCache() {
   try {
-    if (localStorage.getItem("sv-theme")) return; // already have local data
-    const res = await fetch(`/api/session?id=${GUEST_ID}`);
-    const { data } = await res.json();
-    if (!data) return;
-    for (const [k, v] of Object.entries(data)) { localStorage.setItem(k, JSON.stringify(v)); }
-    window.location.reload(); // reload to pick up restored data
+    const migrated = await idbCache.get("sv-migrated-v2");
+    if (migrated) return;
+    // Migrate old stalker category caches from localStorage
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith("sv-s-") && key.includes("cats-")) {
+        try {
+          const { cats } = JSON.parse(localStorage.getItem(key));
+          if (cats) {
+            // Extract server from key: sv-s-{section}cats-{server}
+            const match = key.match(/^sv-s-(vod|series)cats-(.+)$/);
+            if (match) await idbCache.set(`cats-ls:${match[2]}:${match[1]}`, cats);
+          }
+        } catch {}
+      }
+    }
+    // Migrate old stalker channel caches (stored via db.set → localStorage)
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith("sv-stalker-channels-")) {
+        try {
+          const channels = JSON.parse(localStorage.getItem(key));
+          if (channels) {
+            const server = key.replace("sv-stalker-channels-", "");
+            await idbCache.set(`channels-ls:${server}`, channels);
+          }
+        } catch {}
+      }
+    }
+    await idbCache.set("sv-migrated-v2", true);
   } catch {}
-})();
+}
+migrateOldCache();
+
+// Cloud restore disabled — D1 catalog API handles persistence per-connection
+// Future: restore connections list from D1 on first load
 
 // ══════════════════════════════════════════════════════════════════
 // UTILS
@@ -158,8 +233,11 @@ function fmtTime(sec) {
   return h > 0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
 }
 
-function proxyFetch(url) {
-  return fetch(`${PROXY}/proxy?url=${encodeURIComponent(url)}`);
+async function proxyFetch(url) {
+  const path = `/proxy?url=${encodeURIComponent(url)}`;
+  let res = await fetch(`${CATALOG_API}${path}`).catch(() => null);
+  if (!res?.ok) res = await fetch(`${PROXY}${path}`);
+  return res;
 }
 
 function makeXtreamAPI(server, user, pass) {
@@ -173,7 +251,7 @@ function makeXtreamAPI(server, user, pass) {
     getSeriesCategories: () => proxyFetch(`${base}&action=get_series_categories`).then(r => r.json()),
     getSeries: () => proxyFetch(`${base}&action=get_series`).then(r => r.json()),
     getSeriesInfo: (id) => proxyFetch(`${base}&action=get_series_info&series_id=${id}`).then(r => r.json()),
-    liveURL: id => `${server}/live/${user}/${pass}/${id}.m3u8`,
+    liveURL: id => `${server}/live/${user}/${pass}/${id}.ts`,
     vodURL: (id, ext="mp4") => `${server}/movie/${user}/${pass}/${id}.${ext}`,
     seriesStreamURL: (id, ext="mp4") => `${server}/series/${user}/${pass}/${id}.${ext}`,
   };
@@ -181,20 +259,33 @@ function makeXtreamAPI(server, user, pass) {
 
 function uid() { return Math.random().toString(36).slice(2,10); }
 
+// Transform stalker item URL: extract direct HTTP URLs, store original as _stalkerCmd
+function transformStalkerItem(item) {
+  if (item._stalkerCmd !== undefined) return item;
+  const raw = (item.url || "").replace(/^ffmpeg\s+/, "").trim();
+  const isDirect = raw.startsWith("http") && !raw.includes("localhost");
+  return { ...item, _stalkerCmd: item.url, url: isDirect ? raw : null };
+}
+
 // ══════════════════════════════════════════════════════════════════
 // CSS GENERATOR
 // ══════════════════════════════════════════════════════════════════
 function genCSS(t) {
+  const isLight = t.bg === "#ffffff" || t.bg === "#f8f9fc";
+  const b1 = isLight ? "rgba(0,0,0,0.07)" : "rgba(255,255,255,0.06)";
+  const b2 = isLight ? "rgba(0,0,0,0.12)" : "rgba(255,255,255,0.11)";
   return `
 @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:${t.bg};--s1:${t.s1};--s2:${t.s2};--s3:${t.s3};
-  --b1:rgba(255,255,255,0.06);--b2:rgba(255,255,255,0.11);
+  --b1:${b1};--b2:${b2};
   --accent:${t.accent};--accent2:${t.accent2};
   --glow:${t.accent}28;
   --t1:${t.t1};--t2:${t.t2};--t3:${t.t3};
   --danger:#ff4466;--ok:#00cc88;
+  --shadow:${isLight ? "rgba(0,0,0,0.08)" : "rgba(0,0,0,0.5)"};
+  --hover-bg:${isLight ? "rgba(0,0,0,0.04)" : "rgba(255,255,255,0.03)"};
 }
 body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overflow:hidden}
 .app{display:flex;height:100vh;overflow:hidden;background:var(--bg)}
@@ -204,7 +295,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
   background:radial-gradient(ellipse at 20% 70%,${t.accent2}22 0%,transparent 55%),
              radial-gradient(ellipse at 80% 20%,${t.accent}18 0%,transparent 50%),var(--bg);padding:2rem}
 .card{background:var(--s1);border:1px solid var(--b2);border-radius:18px;padding:2.5rem;
-  width:100%;max-width:500px;box-shadow:0 48px 96px #00000080}
+  width:100%;max-width:500px;box-shadow:0 48px 96px var(--shadow)}
 .logo{font-family:'Rajdhani',sans-serif;font-size:2.2rem;font-weight:700;letter-spacing:.12em;
   background:linear-gradient(135deg,${t.accent},${t.accent2});-webkit-background-clip:text;
   -webkit-text-fill-color:transparent;background-clip:text;margin-bottom:.2rem}
@@ -212,7 +303,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .tabs{display:flex;gap:.3rem;background:var(--s2);padding:4px;border-radius:10px;margin-bottom:1.5rem}
 .tab{flex:1;padding:.42rem .2rem;background:none;border:none;border-radius:7px;color:var(--t2);
   font-family:'DM Sans',sans-serif;font-size:.7rem;font-weight:500;cursor:pointer;transition:all .2s;text-align:center;white-space:nowrap}
-.tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px #00000040}
+.tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px var(--shadow)}
 .fg{margin-bottom:1rem}
 .fl{display:block;font-size:.7rem;font-weight:600;color:var(--t2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem}
 .fi{width:100%;background:var(--s2);border:1px solid var(--b2);border-radius:8px;
@@ -237,13 +328,12 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .nav{display:flex;align-items:center;gap:.55rem;padding:.5rem 1rem;color:var(--t2);
   font-size:.82rem;font-weight:500;cursor:pointer;transition:all .15s;border-left:2px solid transparent;
   position:relative}
-.nav:hover{color:var(--t1);background:rgba(255,255,255,0.03)}
+.nav:hover{color:var(--t1);background:var(--hover-bg)}
 .nav.on{color:var(--accent);background:${t.accent}12;border-left-color:var(--accent)}
 .nav-icon{font-size:.9rem;width:17px;text-align:center;flex-shrink:0}
 .nav-badge{margin-left:auto;background:var(--accent2);color:#fff;font-size:.58rem;font-weight:700;
   padding:.1rem .35rem;border-radius:10px}
 .s-bottom{margin-top:auto;padding:.85rem 1rem 0;border-top:1px solid var(--b1);display:flex;flex-direction:column;gap:.4rem}
-.s-conn{font-size:.68rem;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .s-row{display:flex;gap:.4rem}
 .btn-sm{flex:1;padding:.38rem .5rem;background:var(--b1);border:1px solid var(--b2);border-radius:6px;
   color:var(--t2);font-family:'DM Sans',sans-serif;font-size:.7rem;cursor:pointer;transition:all .2s;text-align:center}
@@ -251,13 +341,16 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .btn-sm.danger{color:var(--danger);border-color:#ff446620}
 .btn-sm.danger:hover{background:#ff446612}
 
-/* PROFILES */
-.profiles-row{display:flex;align-items:center;gap:.4rem;padding:0 1rem;margin-bottom:.6rem;flex-wrap:wrap}
-.profile-dot{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;
-  font-size:.65rem;font-weight:700;cursor:pointer;border:2px solid transparent;transition:all .2s;color:#000;flex-shrink:0}
-.profile-dot.active{border-color:var(--t1);transform:scale(1.1)}
-.profile-dot.add{background:var(--s3) !important;color:var(--t2);font-size:1rem;border-color:var(--b2)}
-.profile-name{font-size:.68rem;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 1rem;margin-bottom:.2rem}
+/* CONNECTION CARD */
+.conn-card{margin:0 .6rem .8rem;padding:.55rem .65rem;background:var(--s2);border:1px solid var(--b2);
+  border-left:3px solid var(--accent);border-radius:8px;cursor:pointer;transition:all .2s}
+.conn-card:hover{border-color:var(--accent);background:var(--s3)}
+.conn-card-row{display:flex;align-items:center;gap:.5rem}
+.conn-card-icon{font-size:1rem;flex-shrink:0}
+.conn-card-info{flex:1;min-width:0}
+.conn-card-label{font-size:.75rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conn-card-stats{font-size:.62rem;color:var(--t3)}
+.conn-card-switch{font-size:.6rem;color:var(--accent);text-align:right;margin-top:.25rem;font-weight:600}
 
 /* CONTENT */
 .content{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -273,10 +366,10 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
   color:var(--t2);font-family:'DM Sans',sans-serif;font-size:.75rem;cursor:pointer;transition:all .2s;white-space:nowrap}
 .c-btn:hover{color:var(--t1);border-color:var(--b2)}
 .c-btn.active{color:var(--accent);border-color:${t.accent}40;background:${t.accent}10}
-.c-body{flex:1;overflow-y:auto;padding:1.1rem 1.4rem;display:flex;gap:1.1rem}
+.c-body{flex:1;overflow:hidden;padding:1.1rem 1.4rem;display:flex;gap:1.1rem;min-height:0}
 
 /* CATEGORIES */
-.cats{width:150px;flex-shrink:0}
+.cats{width:150px;flex-shrink:0;overflow-y:auto;overflow-x:hidden;height:0;min-height:100%}
 .cat{padding:.4rem .65rem;border-radius:7px;font-size:.75rem;color:var(--t2);cursor:pointer;
   transition:all .15s;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
   display:flex;align-items:center;gap:.4rem}
@@ -288,7 +381,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .ch-grid{flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:.6rem;align-content:start}
 .ch-card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;padding:.8rem .7rem;
   cursor:pointer;transition:all .2s;display:flex;flex-direction:column;align-items:center;gap:.5rem;text-align:center;position:relative}
-.ch-card:hover{border-color:var(--b2);background:var(--s2);transform:translateY(-2px);box-shadow:0 8px 24px #00000040}
+.ch-card:hover{border-color:var(--b2);background:var(--s2);transform:translateY(-2px);box-shadow:0 8px 24px var(--shadow)}
 .ch-card.playing{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 8px 24px var(--glow)}
 .ch-logo{width:42px;height:42px;object-fit:contain;border-radius:6px;background:var(--s2)}
 .ch-logo-ph{width:42px;height:42px;background:var(--s3);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:1.1rem}
@@ -305,7 +398,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .vod-grid{flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:.75rem;align-content:start}
 .vod-card{background:var(--s1);border:1px solid var(--b1);border-radius:10px;overflow:hidden;cursor:pointer;
   transition:all .2s;position:relative}
-.vod-card:hover{border-color:var(--b2);transform:translateY(-2px);box-shadow:0 14px 32px #00000050}
+.vod-card:hover{border-color:var(--b2);transform:translateY(-2px);box-shadow:0 14px 32px var(--shadow)}
 .vod-poster{width:100%;aspect-ratio:2/3;object-fit:cover;background:var(--s2);display:block}
 .vod-ph{width:100%;aspect-ratio:2/3;background:var(--s2);display:flex;align-items:center;justify-content:center;font-size:2rem}
 .vod-info{padding:.55rem .65rem}
@@ -408,13 +501,13 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 /* DIRECT HLS */
 .hls-body{padding:1.4rem;display:flex;flex-direction:column;gap:1rem;flex:1}
 .hls-row{display:flex;gap:.65rem}
-.btn-go{padding:.62rem 1.1rem;background:var(--accent);border:none;border-radius:8px;color:#000;
+.btn-go{padding:.62rem 1.1rem;background:var(--accent);border:none;border-radius:8px;color:#fff;
   font-family:'Rajdhani',sans-serif;font-weight:700;font-size:.95rem;cursor:pointer;transition:opacity .2s;white-space:nowrap}
 .btn-go:hover{opacity:.82}
 
 /* CONTEXT MENU */
 .ctx-menu{position:fixed;background:var(--s2);border:1px solid var(--b2);border-radius:9px;
-  padding:.35rem;z-index:500;box-shadow:0 12px 32px #00000060;min-width:140px;animation:fadeIn .12s ease}
+  padding:.35rem;z-index:500;box-shadow:0 12px 32px var(--shadow);min-width:140px;animation:fadeIn .12s ease}
 .ctx-item{padding:.42rem .75rem;font-size:.78rem;color:var(--t1);cursor:pointer;border-radius:6px;transition:all .15s;display:flex;align-items:center;gap:.5rem}
 .ctx-item:hover{background:var(--b2)}
 .ctx-item.red{color:var(--danger)}
@@ -440,17 +533,13 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 
 /* MODAL */
 .modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:400;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(6px)}
-.modal{background:var(--s1);border:1px solid var(--b2);border-radius:14px;padding:1.5rem;width:100%;max-width:360px;box-shadow:0 24px 60px #000000a0}
+.modal{background:var(--s1);border:1px solid var(--b2);border-radius:14px;padding:1.5rem;width:100%;max-width:360px;box-shadow:0 24px 60px var(--shadow)}
 .modal-title{font-family:'Rajdhani',sans-serif;font-size:1.2rem;font-weight:700;margin-bottom:1.2rem}
-.profile-edit-row{display:flex;gap:.5rem;margin-bottom:1rem;align-items:center}
-.profile-color-pick{display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:1rem}
-.pcp{width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:all .2s;flex-shrink:0}
-.pcp.on{border-color:var(--t1);transform:scale(1.15)}
 .modal-btns{display:flex;gap:.5rem;justify-content:flex-end}
 .btn-cancel{padding:.45rem .9rem;background:var(--s2);border:1px solid var(--b2);border-radius:7px;
   color:var(--t2);font-family:'DM Sans',sans-serif;font-size:.8rem;cursor:pointer}
 .btn-confirm{padding:.45rem .9rem;background:var(--accent);border:none;border-radius:7px;
-  color:#000;font-family:'Rajdhani',sans-serif;font-size:.88rem;font-weight:700;cursor:pointer}
+  color:#fff;font-family:'Rajdhani',sans-serif;font-size:.88rem;font-weight:700;cursor:pointer}
 
 /* DISCOVER */
 .discover-body{flex:1;overflow-y:auto;padding:1.2rem 1.4rem}
@@ -501,7 +590,7 @@ body{background:var(--bg);font-family:'DM Sans',sans-serif;color:var(--t1);overf
 .series-seasons-tabs{display:flex;gap:.3rem;background:var(--s2);padding:4px;border-radius:10px;margin-bottom:1rem;flex-wrap:wrap}
 .series-season-tab{padding:.4rem .75rem;background:none;border:none;border-radius:7px;color:var(--t2);
   font-family:'DM Sans',sans-serif;font-size:.75rem;font-weight:500;cursor:pointer;transition:all .2s;white-space:nowrap}
-.series-season-tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px #00000040}
+.series-season-tab.on{background:var(--s3);color:var(--accent);box-shadow:0 2px 8px var(--shadow)}
 .series-ep-list{display:flex;flex-direction:column;gap:.4rem}
 .series-ep-item{display:flex;align-items:center;gap:.75rem;padding:.6rem .8rem;background:var(--s2);border:1px solid var(--b1);
   border-radius:9px;cursor:pointer;transition:all .15s}
@@ -526,7 +615,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
   const osdTimer   = useRef(null);
   const [osd, setOsd]         = useState(true);
   const [showQCH, setShowQCH] = useState(false);
-  const [qchTimer, setQchTimer] = useState(null);
+  const qchTimer = useRef(null);
   const [chIdx, setChIdx]     = useState(() => {
     if (!channelList) return -1;
     return channelList.findIndex(c => c.id === item.id || c.url === item.url);
@@ -547,11 +636,10 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
   const [streamErr, setStreamErr] = useState(null);
 
   const isMixed = location.protocol === "https:" ? (u) => u?.startsWith("http://") : () => false;
-  // Stalker/Xtream streams have IP-bound tokens — must proxy through local proxy (same IP that got the token)
-  // Other streams use Cloudflare Worker /stream proxy
-  const streamProxy = (u) => connType === "stalker" || connType === "xtream"
-    ? `${PROXY}/stream?url=${encodeURIComponent(u)}`
-    : `/stream?url=${encodeURIComponent(u)}`;
+  // External IPTV servers don't send CORS headers — always proxy M3U/Xtream streams
+  const needsProxy = (u) => isMixed(u) || ((connType === "m3u" || connType === "xtream") && u && !u.startsWith(PROXY) && !u.startsWith(STREAM_PROXY) && !u.startsWith(CATALOG_API));
+  // Proxy streams through STREAM_PROXY (may differ from API proxy) — skip if already proxied
+  const streamProxy = (u) => (u?.startsWith(PROXY) || u?.startsWith(STREAM_PROXY) || u?.startsWith(CATALOG_API)) ? u : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
 
   function initPlayer(url) {
     const video = videoRef.current;
@@ -560,15 +648,22 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     destroyPlayers();
     video.removeAttribute("src");
 
+    // Native <video> error handler (for direct src= playback)
+    video.onerror = () => {
+      // Skip if HLS.js or mpegts.js is handling (they have their own error handlers)
+      if (hlsRef.current || mpegtsRef.current) return;
+      const e = video.error;
+      const msgs = { 1: "Playback aborted", 2: "Network error — could not load stream", 3: "Decode error — stream format not supported", 4: "Source not supported — the stream format or URL is invalid" };
+      setStreamErr({ icon: "⚠️", title: "Playback Error", body: msgs[e?.code] || "Unknown video error" });
+    };
+
     function startHls(u) {
       if (window.Hls?.isSupported()) {
         const opts = { enableWorker: false, fragLoadingMaxRetry: 2 };
-        // On HTTPS pages, proxy HTTP streams through Cloudflare Worker
-        if (isMixed(u)) {
+        // On HTTPS pages, proxy HTTP streams through proxy
+        // The proxy rewrites HLS manifests so segments also go through proxy (same IP)
+        if (needsProxy(u)) {
           u = streamProxy(u);
-          opts.xhrSetup = (xhr, xhrUrl) => {
-            if (xhrUrl.startsWith("http://")) xhr.open("GET", streamProxy(xhrUrl));
-          };
         }
         const hls = new window.Hls(opts);
         hlsRef.current = hls;
@@ -599,19 +694,44 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
           destroyPlayers();
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = isMixed(u) ? streamProxy(u) : u; video.play().catch(()=>{});
+        video.src = needsProxy(u) ? streamProxy(u) : u; video.play().catch(()=>{});
       }
     }
 
     function startMpegts(u) {
       // Proxy HTTP streams through Cloudflare Worker when on HTTPS
-      if (isMixed(u)) u = streamProxy(u);
+      if (needsProxy(u)) u = streamProxy(u);
       if (!window.mpegts?.isSupported()) {
         video.src = u; video.play().catch(()=>{}); return;
       }
       const player = window.mpegts.createPlayer({ type: "mpegts", isLive: true, url: u },
         { enableWorker: false, lazyLoadMaxDuration: 3 * 60, seekType: "range" });
       mpegtsRef.current = player;
+      player.on(window.mpegts.Events.ERROR, (errType, errDetail, errInfo) => {
+        const code = errInfo?.code;
+        let title = "Playback Error";
+        let body;
+        if (code === 404) {
+          title = "Stream Not Found (404)";
+          body = "The stream URL returned 404. The channel may be offline or the URL has changed.";
+        } else if (code === 403) {
+          title = "Access Denied (403)";
+          body = "The stream server rejected the request. Your credentials may not have access.";
+        } else if (code >= 400 && code < 500) {
+          title = `Client Error (${code})`;
+          body = `The stream request was rejected with HTTP ${code}.`;
+        } else if (code >= 500) {
+          title = `Server Error (${code})`;
+          body = "The stream server returned an error. It may be overloaded or temporarily down.";
+        } else if (errType === "NetworkError") {
+          title = "Network Error";
+          body = `Could not load the stream. ${errInfo?.msg || "Check your connection or try again."}`;
+        } else {
+          body = `${errType}: ${errDetail || "Unknown error"}${code ? ` (HTTP ${code})` : ""}`;
+        }
+        setStreamErr({ icon: "⚠️", title, body });
+        destroyPlayers();
+      });
       player.attachMediaElement(video);
       player.load();
       player.play().catch(()=>{});
@@ -623,20 +743,14 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
       s.src = src; s.onload = cb; document.head.appendChild(s);
     }
 
-    // Detect Xtream VOD URLs: /movie/user/pass/id.ext (should use HLS, not mpegts)
-    const xtreamVodMatch = url.match(/^(https?:\/\/[^/]+\/)movie\/([^/]+\/[^/]+\/\d+)\.\w+$/);
-    if (xtreamVodMatch) {
-      // Rewrite VOD URL to .m3u8 — Xtream servers support HLS for VOD
-      const hlsUrl = xtreamVodMatch[1] + "movie/" + xtreamVodMatch[2] + ".m3u8";
-      if (window.Hls) startHls(hlsUrl);
-      else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
-                      () => startHls(hlsUrl));
+    // Direct video files (MP4, MKV, AVI, etc.) — play natively, not via mpegts/HLS
+    const fileExt = url.split(/[?#]/)[0].split(".").pop()?.toLowerCase();
+    if (["mp4", "mkv", "avi", "mov", "webm", "mp3", "aac"].includes(fileExt)) {
+      video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
       return;
     }
 
-    // Stalker VOD/series items are direct video files (MKV, MP4, etc.) served by the portal.
-    // They should NOT use mpegts.js (which is for live TS streams). Play them via the
-    // <video> element directly, or via HLS if the URL ends in .m3u8.
+    // Stalker VOD/series items are direct video files served by the portal.
     const isStalkerVod = (current.type === "vod" || current.type === "series")
       && (url.includes("/play/movie.php") || url.includes("/play/live.php") || url.includes("play_token="));
     if (isStalkerVod) {
@@ -645,8 +759,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
         else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
                         () => startHls(url));
       } else {
-        // Direct video file — proxy if needed for mixed content, let <video> handle it
-        video.src = isMixed(url) ? streamProxy(url) : url; video.play().catch(()=>{});
+        video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
       }
       return;
     }
@@ -655,14 +768,13 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
       || (current.type === "live" && !url.includes(".m3u8"));
     const needHls = !needTs && (url.includes(".m3u8") || url.includes("/live/") || url.includes("/movie/"));
 
-    // For Xtream live streams on HTTPS, prefer HLS (.m3u8) over raw TS since we can proxy HLS segments
-    const xtreamBase = url.match(/^(https?:\/\/[^/]+\/)[^/]+\/[^/]+\/(\d+)$/);
-    if (needTs && isMixed(url) && xtreamBase) {
-      // Rewrite to .m3u8 — Xtream servers support both formats
-      const hlsUrl = xtreamBase[1] + url.split("/").slice(3).join("/") + ".m3u8";
-      if (window.Hls) startHls(hlsUrl);
-      else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
-                      () => startHls(hlsUrl));
+    // For Xtream live streams on HTTPS, proxy raw TS through stream proxy
+    // (HLS .m3u8 has IP-bound segment tokens that break with proxied manifests)
+    if (needTs && needsProxy(url)) {
+      const proxied = streamProxy(url);
+      if (window.mpegts) startMpegts(proxied);
+      else loadScript("https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js",
+                      () => startMpegts(proxied));
       return;
     }
 
@@ -675,7 +787,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
       else loadScript("https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.4.12/hls.min.js",
                       () => startHls(url));
     } else {
-      video.src = isMixed(url) ? streamProxy(url) : url; video.play().catch(()=>{});
+      video.src = needsProxy(url) ? streamProxy(url) : url; video.play().catch(()=>{});
     }
   }
 
@@ -685,6 +797,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     return () => {
       destroyPlayers();
       clearTimeout(osdTimer.current);
+      clearTimeout(qchTimer.current);
     };
   }, [current.url]);
 
@@ -744,8 +857,8 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     const i = Math.max(0, (chIdx < 0 ? 0 : chIdx) - 1);
     setChIdx(i); setCurrent(channelList[i]);
     setShowQCH(true);
-    clearTimeout(qchTimer);
-    setQchTimer(setTimeout(() => setShowQCH(false), 2500));
+    clearTimeout(qchTimer.current);
+    qchTimer.current = setTimeout(() => setShowQCH(false), 2500);
     showOSD();
   }
 
@@ -755,8 +868,8 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
     const i = Math.min(max, (chIdx < 0 ? 0 : chIdx) + 1);
     setChIdx(i); setCurrent(channelList[i]);
     setShowQCH(true);
-    clearTimeout(qchTimer);
-    setQchTimer(setTimeout(() => setShowQCH(false), 2500));
+    clearTimeout(qchTimer.current);
+    qchTimer.current = setTimeout(() => setShowQCH(false), 2500);
     showOSD();
   }
 
@@ -857,7 +970,7 @@ function Player({ item, channelList, epgData, onClose, onFav, isFav, connType })
 // ══════════════════════════════════════════════════════════════════
 // SETUP
 // ══════════════════════════════════════════════════════════════════
-function Setup({ onConnect }) {
+function Setup({ onConnect, connections = [], onReconnect }) {
   const [type, setType]     = useState("xtream");
   const [f, setF]           = useState({ server:"", user:"", pass:"", mac:"", url:"", serial:"", deviceId:"", deviceId2:"" });
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -868,21 +981,29 @@ function Setup({ onConnect }) {
   const set = (k,v) => setF(p => ({...p,[k]:v}));
 
   useEffect(() => {
-    const saved = localStorage.getItem("sv-lastConn");
-    if (saved) {
-      try {
-        const c = JSON.parse(saved);
-        if (c.type) setType(c.type);
-        if (c.server) set("server", c.server);
-        if (c.user) set("user", c.user);
-        if (c.pass) set("pass", c.pass);
-        if (c.mac) set("mac", c.mac);
-        if (c.url) set("url", c.url);
-        if (c.serial) set("serial", c.serial);
-        if (c.deviceId) set("deviceId", c.deviceId);
-        if (c.deviceId2) set("deviceId2", c.deviceId2);
-      } catch {}
-    }
+    // Pre-fill from last active connection (or most recent saved connection)
+    try {
+      const conns = localStorage.getItem("sv-connections");
+      if (conns) {
+        const connList = JSON.parse(conns);
+        if (!connList?.length) return;
+        const acId = localStorage.getItem("sv-activeConn");
+        const activeId = acId ? JSON.parse(acId) : null;
+        const active = (activeId && connList.find(c => c.id === activeId)) || connList[connList.length - 1];
+        if (active?.config) {
+          const c = active.config;
+          if (c.type) setType(c.type);
+          if (c.server) set("server", c.server);
+          if (c.user) set("user", c.user);
+          if (c.pass) set("pass", c.pass);
+          if (c.mac) set("mac", c.mac);
+          if (c.url) set("url", c.url);
+          if (c.serial) set("serial", c.serial);
+          if (c.deviceId) set("deviceId", c.deviceId);
+          if (c.deviceId2) set("deviceId2", c.deviceId2);
+        }
+      }
+    } catch {}
   }, []);
 
   async function connect() {
@@ -894,7 +1015,7 @@ function Setup({ onConnect }) {
         const api = makeXtreamAPI(server, f.user, f.pass);
         const data = await api.auth();
         if (data?.user_info?.auth === 0) throw new Error("Invalid credentials");
-        localStorage.setItem("sv-lastConn", JSON.stringify({ type, ...f }));
+        // Connection saved by handleConnect in App
         onConnect({ type, server, user:f.user, pass:f.pass, info:data?.user_info });
       } else if (type === "m3u") {
         if (!f.url) throw new Error("Playlist URL required");
@@ -904,21 +1025,21 @@ function Setup({ onConnect }) {
         if (!text.includes("#EXTM3U")) throw new Error("Not a valid M3U playlist");
         const channels = parseM3U(text);
         if (!channels.length) throw new Error("No channels found");
-        localStorage.setItem("sv-lastConn", JSON.stringify({ type, ...f }));
+        // Connection saved by handleConnect in App
         onConnect({ type, url:f.url, channels });
       } else if (type === "stalker") {
         if (!f.server||!f.mac) throw new Error("Portal URL and MAC required");
         const server = f.server.trim().replace(/\/$/,"");
-        const hs = await fetch(`${PROXY}/stalker/handshake`, {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ portal: server, mac: f.mac.trim(), serial:f.serial?.trim()||undefined, deviceId:f.deviceId?.trim()||undefined, deviceId2:(f.deviceId2?.trim()||f.deviceId?.trim())||undefined })
-        });
+        const hsBody = JSON.stringify({ portal: server, mac: f.mac.trim(), serial:f.serial?.trim()||undefined, deviceId:f.deviceId?.trim()||undefined, deviceId2:(f.deviceId2?.trim()||f.deviceId?.trim())||undefined });
+        // Try CF Worker first (always-open CORS), fall back to Koyeb
+        let hs = await fetch(`${CATALOG_API}/stalker/handshake`, { method:"POST", headers:{"Content-Type":"application/json"}, body: hsBody }).catch(()=>null);
+        if (!hs?.ok) hs = await fetch(`${PROXY}/stalker/handshake`, { method:"POST", headers:{"Content-Type":"application/json"}, body: hsBody });
         const hsData = await hs.json();
         if (!hs.ok || hsData.error) throw new Error(hsData.error || "Stalker handshake failed");
-        localStorage.setItem("sv-lastConn", JSON.stringify({ type, ...f }));
+        // Connection saved by handleConnect in App
         onConnect({ type, server, mac:f.mac.trim(), serial:f.serial.trim()||undefined, deviceId:f.deviceId.trim()||undefined, deviceId2:(f.deviceId2.trim()||f.deviceId.trim())||undefined });
       } else {
-        localStorage.setItem("sv-lastConn", JSON.stringify({ type, ...f }));
+        // Connection saved by handleConnect in App
         onConnect({ type:"hls" });
       }
     } catch(e) { setErr(e.message||"Connection failed"); }
@@ -1064,6 +1185,37 @@ function Setup({ onConnect }) {
       <div className="card">
         <div className="logo">STREAMVAULT</div>
         <div className="tagline">Your personal IPTV client · Connect your own legal service</div>
+
+        {/* Saved connections — quick reconnect */}
+        {connections.length > 0 && (
+          <div style={{marginBottom:"1.2rem"}}>
+            <div className="fl" style={{marginBottom:".5rem"}}>Saved Connections</div>
+            <div style={{display:"flex",flexDirection:"column",gap:".35rem"}}>
+              {connections.map(c => (
+                <div key={c.id} style={{display:"flex",alignItems:"center",gap:".6rem",padding:".55rem .7rem",
+                  background:"var(--s2)",border:"1px solid var(--b2)",borderLeft:`3px solid ${c.color}`,
+                  borderRadius:"8px",cursor:"pointer",transition:"all .2s"}}
+                  onClick={() => onReconnect(c.id)}
+                  onMouseEnter={e => e.currentTarget.style.borderColor="var(--accent)"}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor="var(--b2)"; e.currentTarget.style.borderLeftColor=c.color; }}>
+                  <span style={{fontSize:"1.1rem"}}>{CONN_ICONS[c.type] || "📡"}</span>
+                  <div style={{flex:1,overflow:"hidden"}}>
+                    <div style={{fontSize:".82rem",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.label}</div>
+                    <div style={{fontSize:".62rem",color:"var(--t3)",textTransform:"capitalize"}}>{c.type}</div>
+                  </div>
+                  <span style={{fontSize:".7rem",color:"var(--accent)",fontWeight:600}}>Connect →</span>
+                </div>
+              ))}
+            </div>
+            <div style={{borderBottom:"1px solid var(--b2)",margin:"1rem 0 .2rem",position:"relative"}}>
+              <span style={{position:"absolute",left:"50%",transform:"translate(-50%,-50%)",background:"var(--s1)",
+                padding:"0 .6rem",fontSize:".65rem",color:"var(--t3)",textTransform:"uppercase",letterSpacing:".08em",fontWeight:600}}>
+                or add new
+              </span>
+            </div>
+          </div>
+        )}
+
         {err && <div className="err">⚠ {err}</div>}
         <div className="tabs">
           {TYPES.map(([k,label]) => (
@@ -1158,27 +1310,43 @@ function Setup({ onConnect }) {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// PROFILE MODAL
+// CONNECTION MANAGER MODAL
 // ══════════════════════════════════════════════════════════════════
-function ProfileModal({ onSave, onCancel }) {
-  const [name, setName]   = useState("Profile");
-  const [color, setColor] = useState(PROFILE_COLORS[0]);
+const CONN_ICONS = { xtream:"📡", stalker:"📺", m3u:"📋", hls:"🔗" };
+
+function ConnectionManager({ connections, activeConnId, onSwitch, onRemove, onAddNew, onClose }) {
   return (
-    <div className="modal-ov" onClick={e => e.target===e.currentTarget && onCancel()}>
-      <div className="modal">
-        <div className="modal-title">New Profile</div>
-        <div className="profile-edit-row">
-          <input className="fi" style={{flex:1}} placeholder="Profile name" value={name} onChange={e=>setName(e.target.value)} />
-        </div>
-        <div style={{fontSize:".7rem",color:"var(--t3)",marginBottom:".5rem",textTransform:"uppercase",letterSpacing:".08em",fontWeight:600}}>Colour</div>
-        <div className="profile-color-pick">
-          {PROFILE_COLORS.map(c => (
-            <div key={c} className={`pcp ${color===c?"on":""}`} style={{background:c}} onClick={() => setColor(c)} />
+    <div className="modal-ov" onClick={e => e.target===e.currentTarget && onClose()}>
+      <div className="modal" style={{maxWidth:"420px"}}>
+        <div className="modal-title">Connections</div>
+        <div style={{display:"flex",flexDirection:"column",gap:".4rem",marginBottom:"1rem",maxHeight:"300px",overflowY:"auto"}}>
+          {connections.map(c => (
+            <div key={c.id} style={{display:"flex",alignItems:"center",gap:".6rem",padding:".55rem .7rem",
+              background: c.id===activeConnId ? "var(--accent)10" : "var(--s2)",
+              border: `1px solid ${c.id===activeConnId ? "var(--accent)" : "var(--b2)"}`,
+              borderLeft: `3px solid ${c.color}`,
+              borderRadius:"8px",cursor:"pointer",transition:"all .2s"}}
+              onClick={() => { if (c.id !== activeConnId) onSwitch(c.id); }}>
+              <span style={{fontSize:"1rem"}}>{CONN_ICONS[c.type] || "📡"}</span>
+              <div style={{flex:1,overflow:"hidden"}}>
+                <div style={{fontSize:".8rem",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.label}</div>
+                <div style={{fontSize:".65rem",color:"var(--t3)",textTransform:"capitalize"}}>{c.type}</div>
+              </div>
+              {c.id === activeConnId && <span style={{fontSize:".6rem",fontWeight:700,color:"var(--accent)",textTransform:"uppercase",letterSpacing:".05em"}}>Active</span>}
+              {c.id !== activeConnId && (
+                <button style={{background:"none",border:"none",cursor:"pointer",fontSize:".75rem",color:"var(--danger)",padding:".2rem .3rem",transition:"opacity .2s"}}
+                  title="Remove connection"
+                  onClick={e => { e.stopPropagation(); onRemove(c.id); }}>✕</button>
+              )}
+            </div>
           ))}
+          {connections.length === 0 && (
+            <div style={{fontSize:".8rem",color:"var(--t3)",textAlign:"center",padding:"1rem"}}>No saved connections</div>
+          )}
         </div>
         <div className="modal-btns">
-          <button className="btn-cancel" onClick={onCancel}>Cancel</button>
-          <button className="btn-confirm" onClick={() => onSave({id:uid(), name:name||"Profile", color})}>Create</button>
+          <button className="btn-cancel" onClick={onClose}>Close</button>
+          <button className="btn-confirm" onClick={onAddNew}>+ Add Connection</button>
         </div>
       </div>
     </div>
@@ -1226,7 +1394,9 @@ export default function App() {
   const [episodeLoading, setEpisodeLoading] = useState(null); // episode number being loaded
 
   // ── ui state
-  const [section, setSection] = useState("live");
+  const [section, setSection] = useState(() => {
+    try { return localStorage.getItem("sv-lastSection") ? JSON.parse(localStorage.getItem("sv-lastSection")) : "live"; } catch { return "live"; }
+  });
   const [cat, setCat]         = useState("All");
   const [search, setSearch]   = useState("");
   const [page, setPage] = useState(1);
@@ -1238,10 +1408,10 @@ export default function App() {
   // ── theme
   const [themeName, setThemeName] = useState("Dark");
 
-  // ── profiles
-  const [profiles, setProfiles]   = useState([{id:"default",name:"Me",color:PROFILE_COLORS[0]}]);
-  const [activeProfile, setActiveProfile] = useState("default");
-  const [showProfileModal, setShowProfileModal] = useState(false);
+  // ── connections (replaces profiles)
+  const [connections, setConnections] = useState([]);
+  const [activeConnId, setActiveConnId] = useState(null);
+  const [showConnManager, setShowConnManager] = useState(false);
 
   // ── favorites {live:{}, vod:{}, series:{}}
   const [favs, setFavs] = useState({live:{}, vod:{}, series:{}});
@@ -1260,13 +1430,16 @@ export default function App() {
   // ── Stalker lazy-load
   const [stalkerVodCats,    setStalkerVodCats]    = useState([]); // [{id,title,count}]
   const [stalkerSeriesCats, setStalkerSeriesCats] = useState([]); // [{id,title,count}]
-  const [loadedCatIds,      setLoadedCatIds]      = useState({ vod: new Set(), series: new Set() });
   const [catLoading,        setCatLoading]        = useState(false);
   const fetchingCatRef = useRef(new Set());  // tracks in-progress category fetches
   const [prefetchProgress, setPrefetchProgress] = useState(null); // {done,total} or null
 
+  // ── last synced timestamps
+  const [lastSynced, setLastSynced] = useState({}); // {live: timestamp, vod: timestamp, series: timestamp}
+  const [autoConnected, setAutoConnected] = useState(false); // true if loaded from IDB cache
+
   // ── TMDB
-  const [tmdbKey, setTmdbKey] = useState(() => localStorage.getItem("sv-tmdb-key") || "");
+  const [tmdbKey, setTmdbKey] = useState(() => localStorage.getItem("sv-tmdb-key") || "548cb796fc67d6997619a8a0f7e011a5");
 
   // ── CSS injection
   useEffect(() => {
@@ -1274,234 +1447,426 @@ export default function App() {
     el.textContent = genCSS(THEMES[themeName]);
   }, [themeName]);
 
-  // ── load persisted data
+  // ── load persisted data + auto-connect from IDB
   useEffect(() => {
     (async () => {
-      const [th, pr, ap, fv, hi, hc, eq] = await Promise.all([
+      // Migrate old profile/lastConn data to new connection system
+      await migrateToConnections();
+
+      const [th, conns, acId, hc, eq] = await Promise.all([
         db.get("sv-theme","Dark"),
-        db.get("sv-profiles",[{id:"default",name:"Me",color:PROFILE_COLORS[0]}]),
-        db.get("sv-activeProfile","default"),
-        db.get("sv-favs-default",{live:{},vod:{},series:{}}),
-        db.get("sv-history",[]),
+        db.get("sv-connections",[]),
+        db.get("sv-activeConn",null),
         db.get("sv-hiddenCats",{live:[],vod:[],series:[]}),
         db.get("sv-epgURL",""),
       ]);
       if (THEME_NAMES.includes(th)) setThemeName(th);
-      setProfiles(pr); setActiveProfile(ap);
-      setFavs(fv); setHistory(hi); setHiddenCats(hc);
+      setConnections(conns);
+      setActiveConnId(acId);
+      setHiddenCats(hc);
       if (eq) setEpgURL(eq);
+
+      // Load per-connection favs + history
+      if (acId) {
+        const [fv, hi] = await Promise.all([
+          db.get(`sv-favs-${acId}`, {live:{},vod:{},series:{}}),
+          db.get(`sv-history-${acId}`, []),
+        ]);
+        setFavs(fv);
+        setHistory(hi);
+      }
+
+      // Auto-connect: if we have an active connection + cached content in IDB, skip Setup
+      if (acId) {
+        try {
+          const connObj = conns.find(c => c.id === acId);
+          if (connObj) await loadFromCache(acId, connObj);
+        } catch {}
+      }
     })();
   }, []);
 
-  // ── save theme
-  useEffect(() => { db.set("sv-theme", themeName); }, [themeName]);
+  // ── load cached content from IDB for a connection
+  async function loadFromCache(id, connObj) {
+    const cachedChannels = await idbCache.get(`content:${id}:live`);
+    if (cachedChannels && cachedChannels.length) {
+      setAutoConnected(true);
+      setConn(connObj.config);
+      setChannels(cachedChannels);
+      const [cachedVod, cachedSeries] = await Promise.all([
+        idbCache.get(`content:${id}:vod`),
+        idbCache.get(`content:${id}:series`),
+      ]);
+      if (cachedVod) setVod(cachedVod);
+      if (cachedSeries) setSeries(cachedSeries);
+      if (connObj.type === "stalker") {
+        const [vc, sc] = await Promise.all([
+          idbCache.get(`cats:${id}:vod`),
+          idbCache.get(`cats:${id}:series`),
+        ]);
+        if (vc) setStalkerVodCats(vc);
+        if (sc) setStalkerSeriesCats(sc);
+      }
+      const syncTs = await idbCache.get(`sync:${id}`);
+      if (syncTs) setLastSynced(syncTs);
+      return true;
+    }
+    return false;
+  }
 
-  // ── load favs when profile changes
+  // ── migrate old profile/lastConn data to connection system
+  async function migrateToConnections() {
+    try {
+      if (localStorage.getItem("sv-connections")) return; // already migrated
+      const saved = localStorage.getItem("sv-lastConn");
+      if (!saved) return;
+      const lastConn = JSON.parse(saved);
+      const cId = connId(lastConn);
+      if (!cId) return;
+      const color = PROFILE_COLORS[0];
+      const label = lastConn.type === "xtream" ? `${lastConn.user} · Xtream`
+        : lastConn.type === "stalker" ? `Stalker · ${(lastConn.mac||"").slice(-5)}`
+        : lastConn.type === "m3u" ? `M3U · ${(lastConn.url||"").split("/").pop()?.slice(0,20)||"playlist"}`
+        : "Direct HLS";
+      const connObj = { id: cId, type: lastConn.type, label, color, config: lastConn };
+      db.set("sv-connections", [connObj]);
+      db.set("sv-activeConn", cId);
+      // Migrate favorites: try active profile first, then default
+      const ap = localStorage.getItem("sv-activeProfile");
+      const activeProfileId = ap ? JSON.parse(ap) : "default";
+      const oldFavs = localStorage.getItem(`sv-favs-${activeProfileId}`);
+      if (oldFavs) {
+        db.set(`sv-favs-${cId}`, JSON.parse(oldFavs));
+      } else {
+        const defFavs = localStorage.getItem("sv-favs-default");
+        if (defFavs) db.set(`sv-favs-${cId}`, JSON.parse(defFavs));
+      }
+      // Migrate global history to per-connection
+      const oldHistory = localStorage.getItem("sv-history");
+      if (oldHistory) db.set(`sv-history-${cId}`, JSON.parse(oldHistory));
+      // Clean up old keys
+      localStorage.removeItem("sv-profiles");
+      localStorage.removeItem("sv-activeProfile");
+      localStorage.removeItem("sv-lastConn");
+      localStorage.removeItem("sv-history");
+    } catch {}
+  }
+
+  // ── save theme
   useEffect(() => {
-    db.get(`sv-favs-${activeProfile}`, {live:{},vod:{},series:{}}).then(setFavs);
-  }, [activeProfile]);
+    db.set("sv-theme", themeName);
+    syncPreferencesToD1({ theme: themeName });
+  }, [themeName]);
+
+  // ── load favs + history when active connection changes
+  useEffect(() => {
+    if (!activeConnId) return;
+    db.get(`sv-favs-${activeConnId}`, {live:{},vod:{},series:{}}).then(setFavs);
+    db.get(`sv-history-${activeConnId}`, []).then(setHistory);
+  }, [activeConnId]);
+
+  // ── persist section to localStorage
+  useEffect(() => {
+    localStorage.setItem("sv-lastSection", JSON.stringify(section));
+  }, [section]);
 
   // ── connection
   useEffect(() => {
     if (!conn) return;
+    // If auto-connected from IDB cache, skip fetching from provider
+    if (autoConnected) {
+      setAutoConnected(false);
+      // Still load EPG (transient, not cached)
+      if (conn.type === "stalker") loadStalkerEPG();
+      else if (epgURL) loadEPG(epgURL);
+      return;
+    }
     if (conn.type === "m3u") {
       setChannels(conn.channels);
+      // Save M3U channels to IDB for persistence
+      const cId = connId(conn);
+      if (cId && conn.channels?.length) {
+        idbCache.set(`content:${cId}:live`, conn.channels);
+        syncContentToD1(cId, "live", conn.channels);
+        idbCache.set(`sync:${cId}`, { ...lastSynced, live: Date.now() });
+        setLastSynced(prev => ({ ...prev, live: Date.now() }));
+      }
       if (epgURL) loadEPG(epgURL);
     } else if (conn.type === "xtream") {
       fetchLive();
+      // Pre-fetch VOD + series in background so they're ready when user switches tabs
+      fetchVOD(false, true);
+      fetchSeries(false, true);
       if (epgURL) loadEPG(epgURL);
     } else if (conn.type === "stalker") {
       fetchStalkerChannels();
+      // Pre-fetch VOD + series categories + items in background
+      loadStalkerCats("vod", false, true);
+      loadStalkerCats("series", false, true);
       loadStalkerEPG();
+    }
+    // Save connection to D1
+    const cId = connId(conn);
+    if (cId) {
+      syncConnectionToD1(cId, conn.type, conn);
     }
   }, [conn]);
 
-  async function fetchLive() {
+  async function fetchLive(force = false) {
     if (!conn || conn.type !== "xtream") return;
+    const cId = connId(conn);
+    // Check IDB first (unless force refresh)
+    if (!force && cId) {
+      const cached = await idbCache.get(`content:${cId}:live`);
+      if (cached && cached.length) { setChannels(cached); return; }
+    }
     setLoading(true);
     try {
       const api = makeXtreamAPI(conn.server, conn.user, conn.pass);
       const [catData, sd] = await Promise.all([api.getLiveCategories(), api.getLive()]);
       const cm = Object.fromEntries(catData.map(c => [c.category_id, c.category_name]));
-      setChannels(sd.map(s => ({ id:String(s.stream_id), name:s.name, logo:s.stream_icon,
-        group:cm[s.category_id]||"Other", url:api.liveURL(s.stream_id), num:s.num, epgId:s.epg_channel_id, type:"live" })));
+      const items = sd.map(s => ({ id:String(s.stream_id), name:s.name, logo:s.stream_icon,
+        group:cm[s.category_id]||"Other", url:api.liveURL(s.stream_id), num:s.num, epgId:s.epg_channel_id, type:"live" }));
+      setChannels(items);
+      // Persist to IDB + D1
+      if (cId) {
+        idbCache.set(`content:${cId}:live`, items);
+        syncContentToD1(cId, "live", items);
+        const now = Date.now();
+        setLastSynced(prev => { const n = { ...prev, live: now }; idbCache.set(`sync:${cId}`, n); return n; });
+      }
     } catch(e) { console.error(e); }
     finally { setLoading(false); }
   }
 
-  async function fetchVOD() {
-    if (!conn || conn.type !== "xtream" || vod.length) return;
-    setLoading(true);
+  async function fetchVOD(force = false, background = false) {
+    if (!conn || conn.type !== "xtream") return;
+    const cId = connId(conn);
+    // Check IDB first (unless force refresh)
+    if (!force && cId && !vod.length) {
+      const cached = await idbCache.get(`content:${cId}:vod`);
+      if (cached && cached.length) { setVod(cached); return; }
+    }
+    if (!force && vod.length) return;
+    if (!background) setLoading(true);
     try {
       const api = makeXtreamAPI(conn.server, conn.user, conn.pass);
       const [catData, sd] = await Promise.all([api.getVODCategories(), api.getVOD()]);
       const cm = Object.fromEntries(catData.map(c => [c.category_id, c.category_name]));
-      setVod(sd.map(s => ({ id:String(s.stream_id), name:s.name, logo:s.stream_icon,
+      const items = sd.map(s => ({ id:String(s.stream_id), name:s.name, logo:s.stream_icon,
         group:cm[s.category_id]||"Other", url:api.vodURL(s.stream_id, s.container_extension||"mp4"),
-        year:s.year, rating:s.rating, type:"vod" })));
+        year:s.year, rating:s.rating, type:"vod" }));
+      setVod(items);
+      if (cId) {
+        idbCache.set(`content:${cId}:vod`, items);
+        syncContentToD1(cId, "vod", items);
+        const now = Date.now();
+        setLastSynced(prev => { const n = { ...prev, vod: now }; idbCache.set(`sync:${cId}`, n); return n; });
+      }
     } catch(e) { console.error(e); }
-    finally { setLoading(false); }
+    finally { if (!background) setLoading(false); }
   }
 
-  async function fetchSeries() {
-    if (!conn || conn.type !== "xtream" || series.length) return;
-    setLoading(true);
+  async function fetchSeries(force = false, background = false) {
+    if (!conn || conn.type !== "xtream") return;
+    const cId = connId(conn);
+    if (!force && cId && !series.length) {
+      const cached = await idbCache.get(`content:${cId}:series`);
+      if (cached && cached.length) { setSeries(cached); return; }
+    }
+    if (!force && series.length) return;
+    if (!background) setLoading(true);
     try {
       const api = makeXtreamAPI(conn.server, conn.user, conn.pass);
       const [catData, sd] = await Promise.all([api.getSeriesCategories(), api.getSeries()]);
       const cm = Object.fromEntries(catData.map(c => [c.category_id, c.category_name]));
-      setSeries(sd.map(s => ({ id:String(s.series_id), name:s.name, logo:s.cover,
-        group:cm[s.category_id]||"Other", year:s.releaseDate?.slice(0,4), rating:s.rating, type:"series" })));
+      const items = sd.map(s => ({ id:String(s.series_id), name:s.name, logo:s.cover,
+        group:cm[s.category_id]||"Other", year:s.releaseDate?.slice(0,4), rating:s.rating, type:"series" }));
+      setSeries(items);
+      if (cId) {
+        idbCache.set(`content:${cId}:series`, items);
+        syncContentToD1(cId, "series", items);
+        const now = Date.now();
+        setLastSynced(prev => { const n = { ...prev, series: now }; idbCache.set(`sync:${cId}`, n); return n; });
+      }
     } catch(e) { console.error(e); }
-    finally { setLoading(false); }
+    finally { if (!background) setLoading(false); }
   }
 
-  async function fetchStalkerChannels() {
+  async function fetchStalkerChannels(force = false) {
     if (!conn || conn.type !== "stalker") return;
+    const cId = connId(conn);
+    // Check IDB first (permanent, no TTL)
+    if (!force && cId) {
+      const cached = await idbCache.get(`content:${cId}:live`);
+      if (cached && cached.length) { setChannels(cached); return; }
+    }
     setLoading(true);
     try {
-      const cached = await db.get(`sv-stalker-channels-${conn.server}`);
-      if (cached && cached.length) {
-        setChannels(cached.map(ch => {
-          const raw = (ch.url || "").replace(/^ffmpeg\s+/, "").trim();
-          const isDirect = raw.startsWith("http") && !raw.includes("localhost");
-          return { ...ch, _stalkerCmd: ch.url, url: isDirect ? raw : null };
-        }));
-        setLoading(false);
-        return;
-      }
-      const res = await fetch(`${PROXY}/stalker/channels?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+      const res = await stalkerFetch(`/stalker/channels?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      setChannels((data.channels || []).map(ch => {
-        const raw = (ch.url || "").replace(/^ffmpeg\s+/, "").trim();
-        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
-        return { ...ch, _stalkerCmd: ch.url, url: isDirect ? raw : null };
-      }));
-      db.set(`sv-stalker-channels-${conn.server}`, data.channels);
+      const items = (data.channels || []).map(transformStalkerItem);
+      setChannels(items);
+      // Persist to IDB (permanent) + D1
+      if (cId) {
+        idbCache.set(`content:${cId}:live`, items);
+        syncContentToD1(cId, "live", items);
+        const now = Date.now();
+        setLastSynced(prev => { const n = { ...prev, live: now }; idbCache.set(`sync:${cId}`, n); return n; });
+      }
     } catch(e) { console.error("Stalker channels error:", e); }
     finally { setLoading(false); }
   }
 
-  async function fetchStalkerVOD(force = false) {
-    if (!conn || conn.type !== "stalker" || (!force && vod.length)) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${PROXY}/stalker/vod?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      setVod((data.items || []).map(v => {
-        const raw = (v.url || "").replace(/^ffmpeg\s+/, "").trim();
-        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
-        const groupName = /^\d+$/.test(String(v.group)) ? "Movies" : (v.group || "Other");
-        return { ...v, group: groupName, _stalkerCmd: v.url, url: isDirect ? raw : null };
-      }));
-    } catch(e) { console.error("Stalker VOD error:", e); }
-    finally { setLoading(false); }
-  }
-
-  async function fetchStalkerSeries(force = false) {
-    if (!conn || conn.type !== "stalker" || (!force && series.length)) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${PROXY}/stalker/series?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      setSeries((data.items || []).map(s => ({
-        ...s,
-        group: /^\d+$/.test(String(s.group)) ? "Series" : (s.group || "Other"),
-      })));
-    } catch(e) { console.error("Stalker series error:", e); }
-    finally { setLoading(false); }
-  }
-
-  // ── Load category list for Stalker VOD / Series (fast, single request + 6h cache)
-  async function loadStalkerCats(sec) {
-    const CACHE_KEY = `sv-s-${sec}cats-${conn.server}`;
-    const TTL = 6 * 3600 * 1000;
+  // ── Load category list for Stalker VOD / Series (permanent IDB cache, no TTL)
+  // background=true: don't touch setCat/setLoading (used for pre-fetching on connect)
+  async function loadStalkerCats(sec, force = false, background = false) {
+    const cId = connId(conn);
     let cats = null;
-    try {
-      const raw = localStorage.getItem(CACHE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Date.now() - parsed.ts < TTL) cats = parsed.cats;
-      }
-    } catch {}
+    // Check IDB first (permanent, no TTL)
+    if (!force && cId) {
+      try { cats = await idbCache.get(`cats:${cId}:${sec}`); } catch {}
+    }
     if (!cats) {
-      setLoading(true);
+      if (!background) setLoading(true);
       try {
-        const res  = await fetch(`${PROXY}/stalker/${sec}/categories?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+        const res  = await stalkerFetch(`/stalker/${sec}/categories?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         cats = data.categories || [];
-        localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), cats }));
+        // Save to IDB (permanent) + D1
+        if (cId) {
+          idbCache.set(`cats:${cId}:${sec}`, cats);
+          syncCategoriesToD1(cId, sec, cats);
+        }
       } catch(e) { console.error(`Stalker ${sec} cats:`, e); return; }
-      finally { setLoading(false); }
+      finally { if (!background) setLoading(false); }
     }
     sec === "vod" ? setStalkerVodCats(cats) : setStalkerSeriesCats(cats);
     if (cats.length) {
-      setCat(cats[0].title);
-      loadStalkerCatItems(sec, cats[0].id, cats[0].title);
-      // Option F: background prefetch remaining categories
-      prefetchRemainingStalkerCats(sec, cats);
+      if (!background) {
+        setCat(cats[0].title);
+        loadStalkerCatItems(sec, cats[0].id, cats[0].title);
+      }
+      // Background prefetch all categories (silent)
+      prefetchRemainingStalkerCats(sec, cats, force);
     }
   }
 
-  // ── Load items for one Stalker category (sequential fetch + 6h IndexedDB cache)
-  async function loadStalkerCatItems(sec, catId, catTitle, silent = false) {
+  // ── Load items for one Stalker category (permanent IndexedDB cache, no TTL)
+  async function loadStalkerCatItems(sec, catId, catTitle, silent = false, force = false) {
     const refKey = `${sec}-${catId}`;
     if (fetchingCatRef.current.has(refKey)) return;
     fetchingCatRef.current.add(refKey);
-    const CACHE_KEY = `sv-s-${sec}item-${conn.server}-${catId}`;
-    const TTL = 6 * 3600 * 1000;
+    const cId = connId(conn);
+    const CACHE_KEY = cId ? `catitems:${cId}:${sec}:${catId}` : `sv-s-${sec}item-${conn.server}-${catId}`;
     const applyItems = (items) => {
-      const mapped = items.map(item => {
-        const raw = (item.url || "").replace(/^ffmpeg\s+/, "").trim();
-        const isDirect = raw.startsWith("http") && !raw.includes("localhost");
-        return { ...item, group: catTitle, _stalkerCmd: item.url, url: isDirect ? raw : null };
-      });
+      const mapped = items.map(item => ({ ...transformStalkerItem(item), group: catTitle }));
       if (sec === "vod") setVod(prev => [...prev.filter(v => v.group !== catTitle), ...mapped]);
       else setSeries(prev => [...prev.filter(s => s.group !== catTitle), ...mapped]);
-      setLoadedCatIds(prev => ({ ...prev, [sec]: new Set([...prev[sec], catId]) }));
+
     };
-    try {
-      const cached = await idbCache.get(CACHE_KEY);
-      if (cached && Date.now() - cached.ts < TTL) {
-        applyItems(cached.items); fetchingCatRef.current.delete(refKey); return;
-      }
-    } catch {}
+    if (!force) {
+      try {
+        const cached = await idbCache.get(CACHE_KEY);
+        // No TTL — permanent cache
+        if (cached) {
+          const items = cached.items || cached;
+          if (items.length) { applyItems(items); fetchingCatRef.current.delete(refKey); return; }
+        }
+      } catch {}
+    }
     if (!silent) setCatLoading(true);
     try {
-      const res  = await fetch(`${PROXY}/stalker/${sec}?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cat=${catId}`);
+      const res  = await stalkerFetch(`/stalker/${sec}?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cat=${catId}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       const items = data.items || [];
       applyItems(items);
-      idbCache.set(CACHE_KEY, { ts: Date.now(), items });
+      // Save transformed items to IDB (permanent)
+      idbCache.set(CACHE_KEY, items.map(transformStalkerItem));
     } catch(e) { console.error(`Stalker ${sec} cat items:`, e); }
     finally { if (!silent) setCatLoading(false); fetchingCatRef.current.delete(refKey); }
   }
 
   // ── Option F: background prefetch remaining categories sequentially
-  async function prefetchRemainingStalkerCats(sec, cats) {
+  async function prefetchRemainingStalkerCats(sec, cats, force = false) {
     setPrefetchProgress({ done: 0, total: cats.length });
     let done = 0;
     for (const cat of cats) {
-      await loadStalkerCatItems(sec, cat.id, cat.title, true);
+      await loadStalkerCatItems(sec, cat.id, cat.title, true, force);
       done++;
       setPrefetchProgress({ done, total: cats.length });
     }
     setPrefetchProgress(null);
+    // Full dataset save is handled by the debounced contentSaveEffect below
+  }
+
+  // ── Debounced save: persist vod/series to IDB + D1 when data stabilizes
+  const contentSaveTimer = useRef(null);
+  useEffect(() => {
+    if (!conn) return;
+    const cId = connId(conn);
+    if (!cId) return;
+    clearTimeout(contentSaveTimer.current);
+    contentSaveTimer.current = setTimeout(() => {
+      if (vod.length) {
+        idbCache.set(`content:${cId}:vod`, vod);
+        syncContentToD1(cId, "vod", vod);
+        setLastSynced(prev => { const n = { ...prev, vod: Date.now() }; idbCache.set(`sync:${cId}`, n); return n; });
+      }
+      if (series.length) {
+        idbCache.set(`content:${cId}:series`, series);
+        syncContentToD1(cId, "series", series);
+        setLastSynced(prev => { const n = { ...prev, series: Date.now() }; idbCache.set(`sync:${cId}`, n); return n; });
+      }
+    }, 3000);
+    return () => clearTimeout(contentSaveTimer.current);
+  }, [vod, series, conn]);
+
+  // Build /stalker/play URL — resolves token + streams via CF Worker (stalker tokens are MAC-bound, not IP-bound)
+  function stalkerPlayUrl(cmd, contentType = "live", episode = null) {
+    let url = `${CATALOG_API}/stalker/play?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(cmd)}&content_type=${encodeURIComponent(contentType)}`;
+    if (episode) url += `&episode=${episode}`;
+    return url;
   }
 
   async function resolveStalkerStream(item) {
+    const contentType = item.type || "live";
+    const cmd = item._stalkerCmd;
+
+    // Step 1: Try CF Worker /stalker/play — resolves create_link + streams in same invocation (same IP)
+    // Some portals work fine with CF Worker IPs; this avoids using Koyeb bandwidth entirely.
     try {
-      const contentType = item.type || "live";
-      const res = await fetch(`${PROXY}/stalker/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(item._stalkerCmd)}&content_type=${encodeURIComponent(contentType)}`);
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      return data.url;
-    } catch(e) { console.error("Stream resolve error:", e); return null; }
+      const playUrl = stalkerPlayUrl(cmd, contentType);
+      const res = await fetch(playUrl);
+      if (res.ok) {
+        const ct = res.headers.get("content-type") || "";
+        if (ct.includes("json")) {
+          const data = await res.json();
+          if (data.url) {
+            const u = data.url;
+            return (u.startsWith(PROXY) || u.startsWith(STREAM_PROXY) || u.startsWith(CATALOG_API)) ? u
+              : `${STREAM_PROXY}/stream?url=${encodeURIComponent(u)}`;
+          }
+          if (data.error) console.warn("CF Worker play error:", data.error);
+          else return playUrl; // Worker streamed directly
+        } else {
+          return playUrl; // Worker streamed directly (non-JSON = stream body)
+        }
+      }
+    } catch(e) { console.warn("CF Worker stalker play failed, trying Koyeb:", e.message); }
+
+    // Step 2: Fall back to Koyeb /stalker/stream — stable non-datacenter IP, portal more likely to allow
+    try {
+      const koRes = await fetch(
+        `${PROXY}/stalker/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(cmd)}&content_type=${encodeURIComponent(contentType)}`
+      );
+      const koData = await koRes.json();
+      if (koData.url) return `${STREAM_PROXY}/stream?url=${encodeURIComponent(koData.url)}`;
+      throw new Error(koData.error || "No stream URL from Koyeb");
+    } catch(e) { console.error("Stalker stream resolve failed:", e); return null; }
   }
 
   async function loadEPG(url) {
@@ -1521,7 +1886,7 @@ export default function App() {
     if (!conn || conn.type !== "stalker") return;
     setEpgLoading(true);
     try {
-      const res = await fetch(`${PROXY}/stalker/epg?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&period=4`);
+      const res = await stalkerFetch(`/stalker/epg?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&period=4`);
       const data = await res.json();
       if (data.programs) setEpgData(data.programs);
     } catch(e) { console.error("Stalker EPG error:", e); }
@@ -1549,7 +1914,10 @@ export default function App() {
     if (newFavs[type][key]) delete newFavs[type][key];
     else newFavs[type][key] = { id:item.id, name:item.name, url:item.url, logo:item.logo, group:item.group, type };
     setFavs(newFavs);
-    db.set(`sv-favs-${activeProfile}`, newFavs);
+    if (activeConnId) {
+      db.set(`sv-favs-${activeConnId}`, newFavs);
+      syncFavoritesToD1(activeConnId, newFavs);
+    }
   }
 
   function isFav(item) {
@@ -1562,7 +1930,10 @@ export default function App() {
     const entry = { ...item, timestamp: Date.now(), position: 0 };
     const newH = [entry, ...history.filter(h => (h.id||h.url) !== (item.id||item.url))].slice(0, 60);
     setHistory(newH);
-    db.set("sv-history", newH);
+    if (activeConnId) {
+      db.set(`sv-history-${activeConnId}`, newH);
+    }
+    syncHistoryToD1(newH);
   }
 
   async function playItem(item) {
@@ -1591,7 +1962,7 @@ export default function App() {
 
     try {
       if (conn?.type === "stalker") {
-        const res = await fetch(`${PROXY}/stalker/series/${encodeURIComponent(item.id)}/seasons?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
+        const res = await stalkerFetch(`/stalker/series/seasons?seriesId=${encodeURIComponent(item.id)}&portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         const seasons = data.seasons || [];
@@ -1625,14 +1996,27 @@ export default function App() {
     setEpisodeLoading(episodeNum);
     try {
       if (conn?.type === "stalker") {
-        const res = await fetch(`${PROXY}/stalker/series/episode/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(season.cmd)}&episode=${episodeNum}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        if (!data.url) throw new Error("No stream URL returned");
+        // Resolve series episode stream — try CF Worker first, fall back to Koyeb
+        let resolvedUrl = null;
+        try {
+          const playUrl = stalkerPlayUrl(season.cmd, "series", episodeNum);
+          const res = await fetch(playUrl);
+          const ct = res.headers.get("content-type") || "";
+          if (ct.includes("json")) {
+            const data = await res.json();
+            if (data.url) resolvedUrl = (data.url.startsWith(PROXY) || data.url.startsWith(STREAM_PROXY) || data.url.startsWith(CATALOG_API)) ? data.url : `${STREAM_PROXY}/stream?url=${encodeURIComponent(data.url)}`;
+            else if (!data.error) resolvedUrl = playUrl;
+          } else { resolvedUrl = playUrl; }
+        } catch(e) { console.warn("CF Worker episode play failed, trying Koyeb:", e.message); }
+        if (!resolvedUrl) {
+          const koRes = await fetch(`${PROXY}/stalker/series/episode/stream?portal=${encodeURIComponent(conn.server)}&mac=${encodeURIComponent(conn.mac)}&cmd=${encodeURIComponent(season.cmd)}&episode=${episodeNum}`);
+          const koData = await koRes.json();
+          if (koData.url) resolvedUrl = `${STREAM_PROXY}/stream?url=${encodeURIComponent(koData.url)}`;
+        }
         const epItem = {
           id: `${seriesDetail.item.id}-s${seriesDetail.activeSeason}-e${episodeNum}`,
           name: `${seriesDetail.item.name} - ${season.name} E${episodeNum}`,
-          url: data.url,
+          url: resolvedUrl,
           logo: seriesDetail.item.logo,
           type: "vod",
           group: seriesDetail.item.group,
@@ -1662,19 +2046,73 @@ export default function App() {
     }
   }
 
-  // ── profiles
-  function addProfile(p) {
-    const newP = [...profiles, p];
-    setProfiles(newP);
-    db.set("sv-profiles", newP);
-    setActiveProfile(p.id);
-    db.set("sv-activeProfile", p.id);
-    setShowProfileModal(false);
+  // ── connection management
+  function makeConnectionLabel(type, config) {
+    if (type === "xtream") return `${config.user} · Xtream`;
+    if (type === "stalker") return `Stalker · ${(config.mac||"").slice(-5)}`;
+    if (type === "m3u") return `M3U · ${(config.url||"").split("/").pop()?.slice(0,20)||"playlist"}`;
+    return "Direct HLS";
   }
 
-  function switchProfile(id) {
-    setActiveProfile(id);
-    db.set("sv-activeProfile", id);
+  function saveConnection(connConfig) {
+    const cId = connId(connConfig);
+    if (!cId) return;
+    const existing = connections.find(c => c.id === cId);
+    if (existing) {
+      // Already saved — just activate
+      setActiveConnId(cId);
+      db.set("sv-activeConn", cId);
+      return;
+    }
+    const usedColors = new Set(connections.map(c => c.color));
+    const color = PROFILE_COLORS.find(c => !usedColors.has(c)) || PROFILE_COLORS[connections.length % PROFILE_COLORS.length];
+    const connObj = { id: cId, type: connConfig.type, label: makeConnectionLabel(connConfig.type, connConfig), color, config: connConfig };
+    const newConns = [...connections, connObj];
+    setConnections(newConns);
+    setActiveConnId(cId);
+    db.set("sv-connections", newConns);
+    db.set("sv-activeConn", cId);
+  }
+
+  function switchConnection(id) {
+    if (id === activeConnId) { setShowConnManager(false); return; }
+    const target = connections.find(c => c.id === id);
+    if (!target) return;
+    setShowConnManager(false);
+    // Clear current content
+    setChannels([]); setVod([]); setSeries([]);
+    setStalkerVodCats([]); setStalkerSeriesCats([]);
+
+    fetchingCatRef.current.clear(); setPrefetchProgress(null);
+    setPlaying(null); setCat("All");
+    // Set active and load from IDB
+    setActiveConnId(id);
+    db.set("sv-activeConn", id);
+    (async () => {
+      const loaded = await loadFromCache(id, target);
+      if (!loaded) setConn(target.config);
+    })();
+  }
+
+  function removeConnection(id) {
+    const newConns = connections.filter(c => c.id !== id);
+    setConnections(newConns);
+    db.set("sv-connections", newConns);
+    // Clean up localStorage
+    localStorage.removeItem(`sv-favs-${id}`);
+    localStorage.removeItem(`sv-history-${id}`);
+    // Clean up IDB cache
+    for (const key of [`content:${id}:live`, `content:${id}:vod`, `content:${id}:series`,
+      `cats:${id}:vod`, `cats:${id}:series`, `sync:${id}`]) {
+      idbCache.set(key, null);
+    }
+    // Clean up D1 (cascades: content_items, categories, sync_meta)
+    catalogAPI(`connections?id=${id}`, { method: "DELETE" });
+  }
+
+  function addNewConnection() {
+    setShowConnManager(false);
+    disconnect();
   }
 
   // ── hidden cats
@@ -1702,9 +2140,11 @@ export default function App() {
   function disconnect() {
     setConn(null); setChannels([]); setVod([]); setSeries([]);
     setStalkerVodCats([]); setStalkerSeriesCats([]);
-    setLoadedCatIds({ vod: new Set(), series: new Set() });
+
     fetchingCatRef.current.clear(); setPrefetchProgress(null);
     setSection("live"); setPlaying(null); setCat("All");
+    setActiveConnId(null);
+    db.set("sv-activeConn", null);
   }
 
   // ── DERIVED DATA
@@ -1740,6 +2180,12 @@ export default function App() {
     history.filter(h => h.position > 5 && h.type !== "live").slice(0, 20),
   [history]);
 
+  const historyMap = useMemo(() => {
+    const m = new Map();
+    for (const h of history) m.set(h.id || h.url, h);
+    return m;
+  }, [history]);
+
   // ── global search
   const searchResults = useMemo(() => {
     if (globalQ.length <= 1) return [];
@@ -1747,15 +2193,21 @@ export default function App() {
     return [...channels, ...vod, ...series].filter(i => i.name?.toLowerCase().includes(q)).slice(0, 80);
   }, [globalQ, channels, vod, series]);
 
+  function handleConnect(connConfig) {
+    saveConnection(connConfig);
+    setConn(connConfig);
+  }
+
   if (!conn) return (
     <>
       <style>{genCSS(THEMES[themeName])}</style>
-      <Setup onConnect={setConn} />
+      <Setup onConnect={handleConnect} connections={connections} onReconnect={switchConnection} />
     </>
   );
 
   const LABEL = {discover:"Discover",live:"Live TV",vod:"Movies",series:"Series",favs:"Favorites",continue:"Continue Watching",epg:"TV Guide",search:"Global Search",hls:"Direct Play"};
-  const activeProfile_obj = profiles.find(p=>p.id===activeProfile) || profiles[0];
+  const activeConnection = connections.find(c => c.id === activeConnId);
+  const channelCount = channels.length + vod.length + series.length;
   const curCats = ["live","vod","series"].includes(section) ? curCatsAll : [];
   const curItems = ["live","vod","series"].includes(section) ? curItemsAll : [];
   const totalPages = Math.ceil(curItems.length / PAGE_SIZE);
@@ -1767,20 +2219,20 @@ export default function App() {
       <div className="sidebar">
         <div className="s-logo">STREAMVAULT</div>
 
-        {/* Profiles */}
-        <div className="profiles-row">
-          {profiles.map(p => (
-            <div key={p.id} className={`profile-dot ${p.id===activeProfile?"active":""}`}
-              style={{background:p.color}} title={p.name}
-              onClick={() => switchProfile(p.id)}>
-              {p.name[0]?.toUpperCase()}
+        {/* Connection Card */}
+        {activeConnection && (
+          <div className="conn-card" style={{borderLeftColor: activeConnection.color}}
+            onClick={() => setShowConnManager(true)} title="Switch connection">
+            <div className="conn-card-row">
+              <span className="conn-card-icon">{CONN_ICONS[activeConnection.type] || "📡"}</span>
+              <div className="conn-card-info">
+                <div className="conn-card-label">{activeConnection.label}</div>
+                <div className="conn-card-stats">{channelCount.toLocaleString()} items</div>
+              </div>
             </div>
-          ))}
-          {profiles.length < 4 && (
-            <div className="profile-dot add" onClick={() => setShowProfileModal(true)} title="Add profile">+</div>
-          )}
-        </div>
-        <div className="profile-name">{activeProfile_obj?.name}</div>
+            <div className="conn-card-switch">▼ Switch</div>
+          </div>
+        )}
 
         {/* Themes */}
         <div className="theme-row">
@@ -1808,12 +2260,6 @@ export default function App() {
         ))}
 
         <div className="s-bottom">
-          <div className="s-conn">
-            {conn.type==="xtream" && `${conn.user} · Xtream`}
-            {conn.type==="m3u" && `M3U · ${channels.length} channels`}
-            {conn.type==="stalker" && conn.mac}
-            {conn.type==="hls" && "Direct HLS"}
-          </div>
           <div className="s-row">
             <button className="btn-sm danger" onClick={disconnect}>⏏ Disconnect</button>
           </div>
@@ -1837,16 +2283,14 @@ export default function App() {
               {conn?.type === "stalker" && (
                 <>
                   <button className="c-btn" title="Reload from portal" onClick={() => {
-                    if (section === "live") { setChannels([]); fetchStalkerChannels(); }
+                    if (section === "live") { setChannels([]); fetchStalkerChannels(true); }
                     else if (section === "vod" || section === "series") {
-                      localStorage.removeItem(`sv-s-${section}cats-${conn.server}`);
                       setVod(section === "vod" ? [] : vod);
                       setSeries(section === "series" ? [] : series);
                       if (section === "vod") setStalkerVodCats([]); else setStalkerSeriesCats([]);
-                      setLoadedCatIds(prev => ({ ...prev, [section]: new Set() }));
                       fetchingCatRef.current.clear();
                       setCat(null);
-                      loadStalkerCats(section);
+                      loadStalkerCats(section, true);
                     }
                   }}>↺ Refresh</button>
                   {prefetchProgress && (
@@ -1855,6 +2299,43 @@ export default function App() {
                     </span>
                   )}
                 </>
+              )}
+              {conn?.type === "xtream" && (
+                <button className="c-btn" title="Reload from provider" onClick={() => {
+                  if (section === "live") { setChannels([]); fetchLive(true); }
+                  else if (section === "vod") { setVod([]); fetchVOD(true); }
+                  else if (section === "series") { setSeries([]); fetchSeries(true); }
+                }}>↺ Refresh</button>
+              )}
+              {conn?.type === "m3u" && section === "live" && (
+                <button className="c-btn" title="Re-fetch M3U playlist" onClick={async () => {
+                  try {
+                    setLoading(true);
+                    const res = await proxyFetch(conn.url);
+                    const text = await res.text();
+                    const chs = parseM3U(text);
+                    setChannels(chs);
+                    const cId = connId(conn);
+                    if (cId) {
+                      idbCache.set(`content:${cId}:live`, chs);
+                      syncContentToD1(cId, "live", chs);
+                      setLastSynced(prev => ({ ...prev, live: Date.now() }));
+                    }
+                  } catch(e) { console.error("M3U refresh error:", e); }
+                  finally { setLoading(false); }
+                }}>↺ Refresh</button>
+              )}
+              {lastSynced[section] && (
+                <span style={{fontSize:".62rem",color:"var(--t3)",whiteSpace:"nowrap"}} title={new Date(lastSynced[section]).toLocaleString()}>
+                  Synced {(() => {
+                    const mins = Math.floor((Date.now() - lastSynced[section]) / 60000);
+                    if (mins < 1) return "just now";
+                    if (mins < 60) return `${mins}m ago`;
+                    const hrs = Math.floor(mins / 60);
+                    if (hrs < 24) return `${hrs}h ago`;
+                    return `${Math.floor(hrs / 24)}d ago`;
+                  })()}
+                </span>
               )}
               <div className="c-search-wrap">
                 <span className="c-search-icon">🔍</span>
@@ -1965,7 +2446,7 @@ export default function App() {
                   <div className="vod-grid">
                     {paginatedItems.map((item,i) => {
                       const faved = isFav(item);
-                      const hist = history.find(h=>(h.id||h.url)===(item.id||item.url));
+                      const hist = historyMap.get(item.id || item.url);
                       const pct = hist?.position && hist?.duration ? Math.min(100, (hist.position/hist.duration)*100) : 0;
                       return (
                         <div key={item.id||i} className="vod-card" onClick={() => playItem(item)} title={item.name}>
@@ -2006,7 +2487,7 @@ export default function App() {
       {/* ── PLAYER ── */}
       {playing && (
         <Player item={playing}
-          channelList={playing.type==="live" ? channels.filter(c=>c.group===playing.group||true) : null}
+          channelList={playing.type==="live" ? channels : null}
           epgData={epgData}
           onClose={() => setPlaying(null)}
           toggleFav={toggleFav}
@@ -2107,9 +2588,16 @@ export default function App() {
         </div>
       )}
 
-      {/* ── PROFILE MODAL ── */}
-      {showProfileModal && (
-        <ProfileModal onSave={addProfile} onCancel={() => setShowProfileModal(false)} />
+      {/* ── CONNECTION MANAGER ── */}
+      {showConnManager && (
+        <ConnectionManager
+          connections={connections}
+          activeConnId={activeConnId}
+          onSwitch={switchConnection}
+          onRemove={removeConnection}
+          onAddNew={addNewConnection}
+          onClose={() => setShowConnManager(false)}
+        />
       )}
     </div>
   );
@@ -2248,16 +2736,20 @@ function EPGView({ channels, epgData, epgURL, setEpgURL, epgLoading, loadEPG, on
   const [urlInput, setUrlInput] = useState(epgURL||"");
   const [search, setSearch] = useState("");
 
-  // Build 8-slot time window centred on current hour
+  // Build 8-slot time window centred on current hour (recomputes hourly)
+  const [epgHour, setEpgHour] = useState(() => new Date().getHours());
+  useEffect(() => {
+    const id = setInterval(() => setEpgHour(new Date().getHours()), 60000);
+    return () => clearInterval(id);
+  }, []);
   const slots = useMemo(() => {
-    const nowH = new Date().getHours();
-    const startH = Math.max(0, nowH - 1);
+    const startH = Math.max(0, epgHour - 1);
     return Array.from({length:8}, (_,i) => {
       const h = startH + i;
       const base = new Date(); base.setHours(h, 0, 0, 0);
       return { label: `${String(h % 24).padStart(2,"0")}:00`, startMs: base.getTime(), endMs: base.getTime() + 3600000 };
     });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [epgHour]);
 
   const filteredChannels = useMemo(() => {
     if (!search) return channels;
@@ -2453,7 +2945,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
 
   const hero = trending[0];
 
-  function TMDBCard({ item }) {
+  function renderTMDBCard(item, i) {
     const matches = findAllInLibrary(item);
     const inLib   = matches.length > 0;
     const poster  = item.poster_path ? `${TMDB_IMG}w185${item.poster_path}` : null;
@@ -2461,7 +2953,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
     const rating  = item.vote_average ? item.vote_average.toFixed(1) : null;
     const title   = item.title || item.name || "Unknown";
     return (
-      <div className="disc-card" onClick={() => handleCardClick(item)} title={title}>
+      <div key={item.id || i} className="disc-card" onClick={() => handleCardClick(item)} title={title}>
         {poster
           ? <img className="disc-poster" src={poster} alt={title} />
           : <div className="disc-poster-ph">{item.media_type === "tv" ? "📺" : "🎬"}</div>}
@@ -2508,7 +3000,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
       <div className="disc-section">
         <div className="section-label">Trending This Week</div>
         <div className="disc-row">
-          {trending.map((item, i) => <TMDBCard key={item.id || i} item={item} />)}
+          {trending.map((item, i) => renderTMDBCard(item, i))}
         </div>
       </div>
 
@@ -2516,7 +3008,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
       <div className="disc-section">
         <div className="section-label">Popular Movies</div>
         <div className="disc-row">
-          {popularMovies.map((item, i) => <TMDBCard key={item.id || i} item={{...item, media_type:"movie"}} />)}
+          {popularMovies.map((item, i) => renderTMDBCard({...item, media_type:"movie"}, i))}
         </div>
       </div>
 
@@ -2524,7 +3016,7 @@ function DiscoverView({ tmdbKey, setTmdbKey, vod, series, onPlay }) {
       <div className="disc-section">
         <div className="section-label">Popular TV Shows</div>
         <div className="disc-row">
-          {popularTV.map((item, i) => <TMDBCard key={item.id || i} item={{...item, media_type:"tv"}} />)}
+          {popularTV.map((item, i) => renderTMDBCard({...item, media_type:"tv"}, i))}
         </div>
       </div>
 

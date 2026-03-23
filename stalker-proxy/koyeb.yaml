@@ -4,7 +4,7 @@ services:
   - name: web
     type: web
     git:
-      repository: github.com/frossty/StreamVault
+      repository: github.com/YOUR-USERNAME/StreamVault
       branch: main
       workdir: stalker-proxy
     buildpack:
@@ -24,4 +24,4 @@ services:
       - key: NODE_ENV
         value: production
       - key: ALLOWED_ORIGIN
-        value: "https://streamvault.lookin2share.workers.dev,https://streamvault-poc.pages.dev"
+        value: "*"  # Set to your frontend URL in production

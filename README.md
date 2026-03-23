@@ -1,6 +1,8 @@
 # StreamVault
 
-> A personal IPTV client that runs entirely in the browser — no app install, no subscription, bring your own service.
+A browser-based IPTV client — no app install, no subscription, bring your own service.
+
+**Try it now:** https://streamvault-poc.pages.dev/
 
 Supports **Xtream Codes**, **M3U playlists**, **Stalker/Ministra portals**, and **direct HLS/MP4 URLs**.
 
@@ -10,17 +12,44 @@ Supports **Xtream Codes**, **M3U playlists**, **Stalker/Ministra portals**, and 
 
 | Category | Details |
 |----------|---------|
-| Live TV | Channel grid with logos, live EPG now-playing, channel switching |
-| Movies & Series | Poster grid with year, rating, and resume progress bar |
-| TV Guide | XMLTV EPG grid (load any provider's XML feed) |
-| Global Search | Searches live, movies, and series simultaneously |
-| Favorites | Per-profile favorites across all content types |
-| Continue Watching | Watch history with resume support (last 60 items) |
-| Themes | Dark · Navy · AMOLED · Forest |
-| Player | HLS.js, keyboard shortcuts, Picture-in-Picture, OSD, quick channel switcher |
+| **Live TV** | Channel grid with logos, EPG now-playing, quick channel switcher |
+| **Movies & Series** | Poster grid with year, rating, seasons/episodes, resume progress |
+| **TV Guide** | XMLTV EPG grid — load any provider's XML feed |
+| **Global Search** | Searches live, movies, and series simultaneously |
+| **Favorites** | Per-profile favorites across all content types |
+| **Continue Watching** | Watch history with resume support (last 60 items) |
+| **Themes** | Dark, Navy, AMOLED, Forest |
+| **Player** | HLS.js + mpegts.js, keyboard shortcuts, PiP, OSD overlay |
+| **Offline-ready** | IndexedDB caching — channels/categories persist across sessions |
 
-**Keyboard shortcuts in player:**
-`Space` play/pause · `F` fullscreen · `M` mute · `←→` channels / ±10s · `↑↓` channels / volume · `P` PiP · `Esc` close
+**Player keyboard shortcuts:**
+`Space` play/pause · `F` fullscreen · `M` mute · `←→` ±10s or channels · `↑↓` volume or channels · `P` PiP · `Esc` close
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Browser (React SPA)                                        │
+│  streamvault/src/App.jsx                                    │
+│  - IndexedDB for offline content cache                      │
+│  - HLS.js / mpegts.js for playback                         │
+└────────┬───────────────────────────┬────────────────────────┘
+         │                           │
+         ▼                           ▼
+┌─────────────────────┐   ┌──────────────────────────────────┐
+│  stalker-proxy       │   │  CF Worker (optional)            │
+│  Express on Node.js  │   │  streamvault-worker/             │
+│  - Stalker handshake │   │  - Stalker/Xtream/M3U proxy     │
+│  - CORS proxy        │   │  - Stream proxy (HTTP→HTTPS)     │
+│  - Stream proxy      │   │  - D1 database (persistent)      │
+│  Deploy: Koyeb/      │   │  - KV cache (session paths)      │
+│    Railway/Render     │   │  - Usage analytics               │
+└─────────────────────┘   └──────────────────────────────────┘
+```
+
+You can run **either** the stalker-proxy (simple) **or** the CF Worker (full-featured), or both.
 
 ---
 
@@ -28,33 +57,43 @@ Supports **Xtream Codes**, **M3U playlists**, **Stalker/Ministra portals**, and 
 
 ```
 StreamVault/
-├── streamvault/        # React + Vite frontend
-│   ├── src/App.jsx     # Entire app (single-file architecture)
+├── streamvault/              # React + Vite frontend
+│   ├── src/App.jsx           # Entire app (single-file architecture)
+│   ├── functions/worker.js   # CF Pages stream proxy (legacy)
 │   └── .env.example
-└── stalker-proxy/      # Node.js CORS proxy for Stalker portals
-    ├── src/index.js
-    └── .env.example
+├── stalker-proxy/            # Node.js CORS proxy
+│   ├── src/index.js          # Express server
+│   ├── koyeb.yaml            # Koyeb deploy config
+│   ├── railway.json          # Railway deploy config
+│   └── .env.example
+└── streamvault-worker/       # Cloudflare Worker (optional)
+    ├── src/
+    │   ├── index.js           # Router + CORS
+    │   ├── handlers/          # stalker, stream, catalog, analytics
+    │   └── utils/             # auth, cors, stalker session mgmt
+    ├── migrations/            # D1 database schema
+    └── wrangler.toml
 ```
 
 ---
 
-## Quick start
+## Quick start (local dev)
 
 ### 1. Clone
 
 ```bash
-git clone https://github.com/your-username/StreamVault.git
+git clone https://github.com/YOUR-USERNAME/StreamVault.git
 cd StreamVault
 ```
 
-### 2. Start the Stalker proxy *(only needed for Stalker Portal connections)*
+### 2. Start the proxy *(needed for Stalker portals and CORS)*
 
 ```bash
 cd stalker-proxy
 cp .env.example .env
 npm install
 npm start
-# Proxy runs at http://localhost:3001
+# Runs at http://localhost:3001
 ```
 
 ### 3. Start the frontend
@@ -64,98 +103,154 @@ cd streamvault
 cp .env.example .env
 npm install
 npm run dev
-# App runs at http://localhost:5173
+# Runs at http://localhost:5173
 ```
 
-### 4. Open and connect
+### 4. Connect
 
-Go to `http://localhost:5173` and choose your connection type:
+Open `http://localhost:5173` and choose a connection type:
 
 | Type | What you need |
 |------|--------------|
-| **Xtream Codes** | Server URL · username · password |
+| **Xtream Codes** | Server URL, username, password |
 | **M3U Playlist** | Direct `.m3u` or `.m3u8` URL |
-| **Stalker Portal** | Portal URL · MAC address · proxy running |
-| **Direct HLS** | Any `.m3u8`, DASH, or media URL |
+| **Stalker Portal** | Portal URL, MAC address (proxy must be running) |
+| **Direct HLS** | Any `.m3u8` or media URL |
 
 ---
 
 ## Environment variables
 
-### `streamvault/.env`
+### Frontend (`streamvault/.env`)
 
-```env
-# URL of the stalker-proxy (local or deployed)
-VITE_PROXY_URL=http://localhost:3001
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VITE_PROXY_URL` | `http://localhost:3001` | Stalker proxy / Koyeb backend URL |
+| `VITE_CATALOG_URL` | same as PROXY | CF Worker URL for catalog API (optional) |
+| `VITE_STREAM_PROXY_URL` | same as PROXY | Stream proxy URL (optional, for split routing) |
 
-### `stalker-proxy/.env`
+### Proxy (`stalker-proxy/.env`)
 
-```env
-PORT=3001
-# Lock down to your frontend origin in production
-ALLOWED_ORIGIN=*
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3001` | Server port |
+| `ALLOWED_ORIGIN` | `*` | CORS origin — set to your frontend URL in production |
 
 ---
 
-## Build for production
+## Deploying (free tier)
+
+### Frontend — Cloudflare Pages
+
+1. Fork this repo
+2. Go to [pages.cloudflare.com](https://pages.cloudflare.com) → Create project → Connect to Git
+3. Root directory: `streamvault` · Build: `npm run build` · Output: `dist`
+4. Add env var: `VITE_PROXY_URL` = your proxy URL
+5. Deploy
+
+### Proxy — Koyeb (recommended)
+
+1. Go to [koyeb.com](https://koyeb.com) → Create App → GitHub
+2. Select your fork, work directory: `stalker-proxy`
+3. Build: `npm install` · Run: `npm start`
+4. Add env var: `ALLOWED_ORIGIN` = your Pages URL
+5. Deploy
+
+> `koyeb.yaml` pre-fills these settings. Also works on [Railway](https://railway.app) or [Render](https://render.com).
+
+### CF Worker (optional, replaces proxy)
 
 ```bash
-cd streamvault
-npm run build
-# Output in streamvault/dist/
+cd streamvault-worker
+
+# Create resources
+wrangler kv namespace create SV_CACHE
+wrangler d1 create streamvault-db
+
+# Add the returned IDs to wrangler.toml
+# Run migrations
+wrangler d1 migrations apply streamvault-db
+
+# Deploy
+wrangler deploy
 ```
+
+Set `VITE_CATALOG_URL` in your frontend to the Worker URL.
 
 ---
 
-## Deploying (free)
+## Proxy API
 
-### Step 1 — Deploy the proxy to Koyeb
+### Stalker endpoints
 
-1. Go to [koyeb.com](https://koyeb.com) → **Create App**
-2. Choose **GitHub** → select `frossty/StreamVault`
-3. Set **Work directory** to `stalker-proxy`
-4. Build command: `npm install` · Run command: `npm start`
-5. Add env var: `ALLOWED_ORIGIN` → `*` *(lock down after step 2)*
-6. Deploy — **Proxy is live at `https://institutional-sacha-streamvault-9dcb405f.koyeb.app`**
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/stalker/handshake` | POST | Token handshake with portal |
+| `/stalker/channels` | GET | All live channels with genres |
+| `/stalker/vod/categories` | GET | VOD category list |
+| `/stalker/vod` | GET | VOD items by category |
+| `/stalker/series/categories` | GET | Series category list |
+| `/stalker/series` | GET | Series items by category |
+| `/stalker/series/seasons` | GET | Seasons and episodes for a series |
+| `/stalker/stream` | GET | Resolve stream `cmd` to playable URL |
+| `/stalker/epg` | GET | EPG program data |
+| `/stalker/profile` | GET | STB profile info |
+| `/stalker/api` | GET | Generic portal API passthrough |
 
-> `koyeb.yaml` in `stalker-proxy/` pre-fills most of these settings.
+### Utility endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/stream` | GET | Proxy HTTP streams over HTTPS with HLS manifest rewriting |
+| `/proxy` | GET | Generic CORS proxy for any URL |
+| `/health` | GET | Health check |
+
+All endpoints return JSON with CORS headers (`Access-Control-Allow-Origin: *`).
 
 ---
 
-### Step 2 — Deploy the frontend to Cloudflare Pages
+## How it works
 
-1. Go to [pages.cloudflare.com](https://pages.cloudflare.com) → **Create a project** → **Connect to Git**
-2. Select `frossty/StreamVault`
-3. Set **Root directory** to `streamvault`
-4. Build command: `npm run build` · Build output directory: `dist`
-5. Add env var: `VITE_PROXY_URL` → `https://institutional-sacha-streamvault-9dcb405f.koyeb.app`
-6. Deploy — **Frontend is live at `https://streamvault.lookin2share.workers.dev`**
+### Stream routing
 
----
+| Protocol | Path |
+|----------|------|
+| **Stalker (HTTPS page)** | Browser → Proxy `/stalker/play` → Portal `create_link` → Proxy `/stream` → IPTV server |
+| **Xtream (HTTPS page)** | Browser → Proxy `/proxy` → Xtream API; Browser → Proxy `/stream` → TS/HLS stream |
+| **M3U (HTTPS page)** | Browser → Proxy `/proxy` → M3U fetch; Browser → Proxy `/stream` → stream |
+| **Any (HTTP page)** | Browser → IPTV server directly (no proxy needed) |
 
-### Step 3 — Lock down CORS
+### Stalker session management
 
-Once you have the Pages URL, go back to **Koyeb → Environment** and set:
+Stalker portals require a specific handshake flow:
+1. **Path discovery** — try multiple API paths (`server/load.php`, `portal.php`, etc.)
+2. **Handshake** — get a session token tied to the MAC address
+3. **Token refresh** — auto-refresh on 401 responses
+4. **`create_link`** — resolve channel commands to stream URLs (tokens may be IP-bound)
 
-```
-ALLOWED_ORIGIN=https://streamvault.lookin2share.workers.dev
-```
-
-Every `git push` to `main` auto-deploys both services.
+The proxy (and CF Worker) handle this transparently, including caching discovered paths.
 
 ---
 
 ## Tech stack
 
-- **Frontend** — React 19, Vite 8, HLS.js (lazy-loaded)
-- **Proxy** — Node.js 18+, Express, node-fetch
-- **Styling** — CSS-in-JS via template literal, injected as `<style>` tag (no build-time CSS)
-- **Storage** — `localStorage` (browser) with `window.storage` fallback (custom runtimes)
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 19, Vite 8, single-file App.jsx |
+| Player | HLS.js (adaptive), mpegts.js (raw TS), native `<video>` |
+| Proxy | Node.js 18+, Express, node-fetch |
+| Worker | Cloudflare Workers, D1 (SQLite), KV |
+| Storage | IndexedDB (browser), D1 (cloud sync) |
+| Styling | CSS-in-JS via template literal `<style>` tag |
+
+---
+
+## Disclaimer
+
+StreamVault is a **client application** — it does not provide any IPTV content. You must supply your own IPTV service credentials. Ensure you comply with your provider's terms of service and local laws.
 
 ---
 
 ## License
 
-[MIT](LICENSE)
+[PolyForm Noncommercial 1.0.0](LICENSE) — free for personal and noncommercial use. Commercial use requires a separate license.
