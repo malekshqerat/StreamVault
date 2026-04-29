@@ -2217,7 +2217,7 @@ export default function App() {
     <div className="app">
       {/* ── SIDEBAR ── */}
       <div className="sidebar">
-        <div className="s-logo">STREAMVAULT</div>
+        <div className="s-logo">beout streams</div>
 
         {/* Connection Card */}
         {activeConnection && (
