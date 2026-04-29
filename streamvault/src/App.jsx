@@ -1183,7 +1183,7 @@ function Setup({ onConnect, connections = [], onReconnect }) {
   return (
     <div className="setup">
       <div className="card">
-        <div className="logo">STREAMVAULT</div>
+        <div className="logo">beout streams</div>
         <div className="tagline">Your personal IPTV client · Connect your own legal service</div>
 
         {/* Saved connections — quick reconnect */}
